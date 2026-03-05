@@ -39,8 +39,12 @@ public:
   std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
 
-  hardware_interface::return_type read(const rclcpp::Time & time, const rclcpp::Duration & period) override;
-  hardware_interface::return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) override;
+  hardware_interface::return_type read(
+    const rclcpp::Time & time,
+    const rclcpp::Duration & period) override;
+  hardware_interface::return_type write(
+    const rclcpp::Time & time,
+    const rclcpp::Duration & period) override;
 
 private:
   rclcpp::Logger logger_;
@@ -49,7 +53,7 @@ private:
   //std::vector<hardware_interface::StateInterface::SharedPtr> ordered_exported_state_interfaces_;
   //std::unordered_map<std::string, hardware_interface::StateInterface::SharedPtr>
   //  exported_state_interfaces_;
-  std::vector<double> state_interfaces_values_;    
+  std::vector<double> state_interfaces_values_;
 
   double position_;
   double velocity_;

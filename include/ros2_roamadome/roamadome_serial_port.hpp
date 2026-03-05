@@ -12,7 +12,7 @@ namespace ros2_roamadome
 
 /**
  * @brief Observer interface for serial port events
- * 
+ *
  * Implement this interface to receive notifications of parsed serial data.
  */
 class ISerialObserver
@@ -37,19 +37,19 @@ public:
    * @brief Called when a line is received that doesn't match known patterns
    * @param line The unhandled line content
    */
-  virtual void onUnhandledLine(const std::string& line) = 0;
+  virtual void onUnhandledLine(const std::string & line) = 0;
 };
 
 /**
  * @brief Encapsulates all serial communication with the Roam-A-Dome controller
- * 
+ *
  * This class handles:
  * - Opening/closing serial connection
  * - Configuring serial port parameters (baud rate, termios settings)
  * - Reading data with line-based buffering
  * - Parsing position updates from device responses
  * - Notifying observers via callbacks and/or observer interface
- * 
+ *
  * Zero ROS dependencies - uses only POSIX APIs and C++ standard library.
  * Can be tested independently or run outside ROS context.
  */
@@ -60,7 +60,7 @@ public:
    * @brief Construct a serial port handler
    * @param port_name Device path (e.g., "/dev/ttyACM1")
    */
-  explicit RoamadomeSerialPort(const std::string& port_name);
+  explicit RoamadomeSerialPort(const std::string & port_name);
 
   /**
    * @brief Destructor - closes port if open
@@ -82,7 +82,7 @@ public:
    * @brief Checks if the port is currently open
    * @return true if open, false otherwise
    */
-  bool isOpen() const { return serialFd_ >= 0; }
+  bool isOpen() const {return serialFd_ >= 0;}
 
   /**
    * @brief Configures serial port parameters (baud rate, termios settings)
@@ -96,15 +96,15 @@ public:
    * @param command Command string to send
    * @return true if successfully written, false on error
    */
-  bool sendCommand(const std::string& command);
+  bool sendCommand(const std::string & command);
 
   /**
    * @brief Main read loop - reads from serial and processes lines
-   * 
+   *
    * This should be called periodically (e.g., in RoamadomeControl::read()).
    * Accumulates partial lines across calls and parses complete lines.
    * Invokes registered callbacks/observers when data is parsed or unhandled.
-   * 
+   *
    * @return true if read was successful (may have read 0 bytes), false on error
    */
   bool read();
@@ -131,7 +131,7 @@ public:
    * @brief Register a callback for unhandled lines
    * @param callback Function called as callback(line)
    */
-  void setUnhandledLineCallback(std::function<void(const std::string&)> callback)
+  void setUnhandledLineCallback(std::function<void(const std::string &)> callback)
   {
     unhandledLineCallback_ = callback;
   }
@@ -140,7 +140,7 @@ public:
    * @brief Register an observer interface for notifications
    * @param observer Pointer to observer (lifetime must outlive this object)
    */
-  void registerObserver(ISerialObserver* observer)
+  void registerObserver(ISerialObserver * observer)
   {
     if (observer) {
       observers_.push_back(observer);
@@ -155,31 +155,31 @@ private:
   // Callbacks
   std::function<void(uint32_t, double)> positionCallback_;
   std::function<void(double)> velocityCallback_;
-  std::function<void(const std::string&)> unhandledLineCallback_;
+  std::function<void(const std::string &)> unhandledLineCallback_;
 
   // Observers
-  std::vector<ISerialObserver*> observers_;
+  std::vector<ISerialObserver *> observers_;
 
   /**
    * @brief Parse a line looking for "DOME POSITION: <degrees>"
    * @param line The line to parse
    * @return optional pair of (degrees, radians) if found and valid, empty if not found or invalid
    */
-  std::optional<std::pair<uint32_t, double>> parsePositionLine(const std::string& line);
+  std::optional<std::pair<uint32_t, double>> parsePositionLine(const std::string & line);
 
   /**
    * @brief Split data into lines and extract remainder
    * @param data New data from serial read
    * @return pair of (complete_lines, remaining_incomplete_line)
    */
-  std::pair<std::vector<std::string>, std::string> splitLines(const std::string& data);
+  std::pair<std::vector<std::string>, std::string> splitLines(const std::string & data);
 
   /**
    * @brief Trim whitespace from both ends of a string
    * @param str Input string
    * @return Trimmed string
    */
-  std::string trim(const std::string& str);
+  std::string trim(const std::string & str);
 
   /**
    * @brief Notify all registered observers and callbacks of a position update
@@ -198,7 +198,7 @@ private:
    * @brief Notify all registered observers and callbacks of an unhandled line
    * @param line The unhandled line
    */
-  void notifyUnhandledLineObservers(const std::string& line);
+  void notifyUnhandledLineObservers(const std::string & line);
 };
 
 }  // namespace ros2_roamadome

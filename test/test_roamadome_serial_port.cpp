@@ -33,24 +33,24 @@ public:
     lastVelocity_ = rad_per_sec;
   }
 
-  void onUnhandledLine(const std::string& line) override
+  void onUnhandledLine(const std::string & line) override
   {
     unhandledLineCalled_ = true;
     lastUnhandledLine_ = line;
     unhandledLineCount_++;
   }
 
-  bool positionUpdateCalled() const { return positionUpdateCalled_; }
-  bool velocityUpdateCalled() const { return velocityUpdateCalled_; }
-  bool unhandledLineCalled() const { return unhandledLineCalled_; }
+  bool positionUpdateCalled() const {return positionUpdateCalled_;}
+  bool velocityUpdateCalled() const {return velocityUpdateCalled_;}
+  bool unhandledLineCalled() const {return unhandledLineCalled_;}
 
-  uint32_t lastDegrees() const { return lastDegrees_; }
-  double lastRadians() const { return lastRadians_; }
-  double lastVelocity() const { return lastVelocity_; }
-  std::string lastUnhandledLine() const { return lastUnhandledLine_; }
+  uint32_t lastDegrees() const {return lastDegrees_;}
+  double lastRadians() const {return lastRadians_;}
+  double lastVelocity() const {return lastVelocity_;}
+  std::string lastUnhandledLine() const {return lastUnhandledLine_;}
 
-  int positionUpdateCount() const { return positionUpdateCount_; }
-  int unhandledLineCount() const { return unhandledLineCount_; }
+  int positionUpdateCount() const {return positionUpdateCount_;}
+  int unhandledLineCount() const {return unhandledLineCount_;}
 
   void reset()
   {
@@ -83,8 +83,8 @@ private:
 class TemporaryPipe
 {
 public:
-  explicit TemporaryPipe(const std::string& name = "/tmp/test_roamadome_")
-    : pipePath_(name + std::to_string(getpid()) + "_" + std::to_string(random()))
+  explicit TemporaryPipe(const std::string & name = "/tmp/test_roamadome_")
+  : pipePath_(name + std::to_string(getpid()) + "_" + std::to_string(random()))
   {
     // Create the named pipe
     if (mkfifo(pipePath_.c_str(), 0666) < 0) {
@@ -102,9 +102,9 @@ public:
     }
   }
 
-  const std::string& path() const { return pipePath_; }
+  const std::string & path() const {return pipePath_;}
 
-  void writeData(const std::string& data)
+  void writeData(const std::string & data)
   {
     // Open pipe for writing in non-blocking mode
     int fd = open(pipePath_.c_str(), O_WRONLY | O_NONBLOCK);
@@ -158,7 +158,7 @@ protected:
   }
 
   // Helper to write data to pipe and allow time for read
-  void writeDataAndWait(const std::string& data)
+  void writeDataAndWait(const std::string & data)
   {
     pipe_->writeData(data);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -178,9 +178,9 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_SingleValidPosition)
   bool callbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    callbackInvoked = true;
-    capturedDegrees = deg;
-    capturedRadians = rad;
+      callbackInvoked = true;
+      capturedDegrees = deg;
+      capturedRadians = rad;
   });
 
   writeDataAndWait("DOME POSITION: 123\n");
@@ -213,8 +213,8 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_MultiplePositions)
   uint32_t lastDegrees = 0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    lastDegrees = deg;
-    (void)rad;
+      lastDegrees = deg;
+      (void)rad;
   });
 
   writeDataAndWait("DOME POSITION: 45\nDOME POSITION: 90\nDOME POSITION: 180\n");
@@ -232,8 +232,8 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_PositionRangeMin)
   double capturedRadians = 999.0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    capturedDegrees = deg;
-    capturedRadians = rad;
+      capturedDegrees = deg;
+      capturedRadians = rad;
   });
 
   writeDataAndWait("DOME POSITION: 0\n");
@@ -251,8 +251,8 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_PositionRangeMax)
   double capturedRadians = 0.0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    capturedDegrees = deg;
-    capturedRadians = rad;
+      capturedDegrees = deg;
+      capturedRadians = rad;
   });
 
   writeDataAndWait("DOME POSITION: 359\n");
@@ -270,9 +270,9 @@ TEST_F(RoamadomeSerialPortTest, TestBothCallbackAndObserver_BothNotified)
   uint32_t callbackDegrees = 0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    callbackInvoked = true;
-    callbackDegrees = deg;
-    (void)rad;
+      callbackInvoked = true;
+      callbackDegrees = deg;
+      (void)rad;
   });
 
   MockObserver observer;
@@ -295,9 +295,9 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_LineBufferingAcrossReads)
   bool callbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    callbackInvoked = true;
-    capturedDegrees = deg;
-    (void)rad;
+      callbackInvoked = true;
+      capturedDegrees = deg;
+      (void)rad;
   });
 
   // Write incomplete line
@@ -325,20 +325,21 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_NoUpdate_MalformedPosition)
   std::string unhandledLine;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionCallbackInvoked = true;
-    (void)deg;
-    (void)rad;
+      positionCallbackInvoked = true;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    unhandledLine = line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      unhandledLine = line;
   });
 
   writeDataAndWait("DOME POSITION: abc\n");
   serialPort_->read();
 
-  EXPECT_FALSE(positionCallbackInvoked) << "Position callback should not be invoked for malformed data";
+  EXPECT_FALSE(positionCallbackInvoked) <<
+      "Position callback should not be invoked for malformed data";
   EXPECT_TRUE(unhandledCallbackInvoked) << "Unhandled callback should be invoked";
   EXPECT_EQ(unhandledLine, "DOME POSITION: abc");
 }
@@ -351,20 +352,21 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_NoUpdate_OutOfRange)
   bool unhandledCallbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionCallbackInvoked = true;
-    (void)deg;
-    (void)rad;
+      positionCallbackInvoked = true;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    (void)line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      (void)line;
   });
 
   writeDataAndWait("DOME POSITION: 360\n");
   serialPort_->read();
 
-  EXPECT_FALSE(positionCallbackInvoked) << "Position callback should not be invoked for out-of-range value";
+  EXPECT_FALSE(positionCallbackInvoked) <<
+      "Position callback should not be invoked for out-of-range value";
   EXPECT_TRUE(unhandledCallbackInvoked) << "Unhandled callback should be invoked";
 }
 
@@ -376,14 +378,14 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_NoUpdate_NegativeValue)
   bool unhandledCallbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionCallbackInvoked = true;
-    (void)deg;
-    (void)rad;
+      positionCallbackInvoked = true;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    (void)line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      (void)line;
   });
 
   writeDataAndWait("DOME POSITION: -5\n");
@@ -402,14 +404,14 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_NoUpdate_NonPositionLine)
   std::string unhandledLine;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionCallbackInvoked = true;
-    (void)deg;
-    (void)rad;
+      positionCallbackInvoked = true;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    unhandledLine = line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      unhandledLine = line;
   });
 
   writeDataAndWait("#DPSTATUS OK\n");
@@ -428,14 +430,14 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_NoUpdate_EmptyLine)
   bool unhandledCallbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionCallbackInvoked = true;
-    (void)deg;
-    (void)rad;
+      positionCallbackInvoked = true;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    (void)line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      (void)line;
   });
 
   writeDataAndWait("DOME POSITION: \n");
@@ -453,14 +455,14 @@ TEST_F(RoamadomeSerialPortTest, TestPositionCallback_NoUpdate_PartialPositionLin
   bool unhandledCallbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionCallbackInvoked = true;
-    (void)deg;
-    (void)rad;
+      positionCallbackInvoked = true;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    (void)line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      (void)line;
   });
 
   writeDataAndWait("DOME POSITION:\n");
@@ -499,9 +501,9 @@ TEST_F(RoamadomeSerialPortTest, TestUnhandledLineCallback_NonPositionLines)
   std::string capturedLine;
   bool unhandledCallbackInvoked = false;
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    capturedLine = line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      capturedLine = line;
   });
 
   writeDataAndWait("INFO: Device initialized\n");
@@ -517,9 +519,9 @@ TEST_F(RoamadomeSerialPortTest, TestUnhandledLineCallback_ConsolidatedMultipleLi
 
   int unhandledLineCount = 0;
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledLineCount++;
-    (void)line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledLineCount++;
+      (void)line;
   });
 
   writeDataAndWait("#DPSTATUS OK\nINFO: Ready\n#DPREPORT50\n");
@@ -540,9 +542,9 @@ TEST_F(RoamadomeSerialPortTest, TestLineBuffering_MultipleCompleteLines)
   uint32_t lastDegrees = 0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionUpdateCount++;
-    lastDegrees = deg;
-    (void)rad;
+      positionUpdateCount++;
+      lastDegrees = deg;
+      (void)rad;
   });
 
   writeDataAndWait("DOME POSITION: 30\nDOME POSITION: 60\nDOME POSITION: 90\n");
@@ -560,9 +562,9 @@ TEST_F(RoamadomeSerialPortTest, TestLineBuffering_CarriageReturnHandling)
   bool callbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    callbackInvoked = true;
-    capturedDegrees = deg;
-    (void)rad;
+      callbackInvoked = true;
+      capturedDegrees = deg;
+      (void)rad;
   });
 
   writeDataAndWait("DOME POSITION: 135\r\n");
@@ -580,14 +582,14 @@ TEST_F(RoamadomeSerialPortTest, TestLineBuffering_MixedValidAndInvalidLines)
   int unhandledLineCount = 0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionUpdateCount++;
-    (void)deg;
-    (void)rad;
+      positionUpdateCount++;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledLineCount++;
-    (void)line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledLineCount++;
+      (void)line;
   });
 
   writeDataAndWait("DOME POSITION: 45\n#DPSTATUS\nDOME POSITION: 90\n");
@@ -604,9 +606,9 @@ TEST_F(RoamadomeSerialPortTest, TestLineBuffering_PartialDataInMultipleCycles)
   int positionUpdateCount = 0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionUpdateCount++;
-    (void)deg;
-    (void)rad;
+      positionUpdateCount++;
+      (void)deg;
+      (void)rad;
   });
 
   // Send data in small chunks across multiple read cycles
@@ -635,9 +637,9 @@ TEST_F(RoamadomeSerialPortTest, TestWhitespaceHandling_LeadingWhitespace)
   bool callbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    callbackInvoked = true;
-    capturedDegrees = deg;
-    (void)rad;
+      callbackInvoked = true;
+      capturedDegrees = deg;
+      (void)rad;
   });
 
   writeDataAndWait("DOME POSITION:    150\n");
@@ -655,9 +657,9 @@ TEST_F(RoamadomeSerialPortTest, TestWhitespaceHandling_TrailingWhitespace)
   bool callbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    callbackInvoked = true;
-    capturedDegrees = deg;
-    (void)rad;
+      callbackInvoked = true;
+      capturedDegrees = deg;
+      (void)rad;
   });
 
   writeDataAndWait("DOME POSITION: 200  \n");
@@ -675,14 +677,14 @@ TEST_F(RoamadomeSerialPortTest, TestLargeNumberAfterPosition)
   bool unhandledCallbackInvoked = false;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionCallbackInvoked = true;
-    (void)deg;
-    (void)rad;
+      positionCallbackInvoked = true;
+      (void)deg;
+      (void)rad;
   });
 
-  serialPort_->setUnhandledLineCallback([&](const std::string& line) {
-    unhandledCallbackInvoked = true;
-    (void)line;
+  serialPort_->setUnhandledLineCallback([&](const std::string & line) {
+      unhandledCallbackInvoked = true;
+      (void)line;
   });
 
   writeDataAndWait("DOME POSITION: 999999\n");
@@ -699,9 +701,9 @@ TEST_F(RoamadomeSerialPortTest, TestPositionPrefix_CouldMatchMultipleTimes)
   int positionUpdateCount = 0;
 
   serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
-    positionUpdateCount++;
-    (void)deg;
-    (void)rad;
+      positionUpdateCount++;
+      (void)deg;
+      (void)rad;
   });
 
   // Line with "DOME POSITION:" appearing after other text
@@ -713,7 +715,7 @@ TEST_F(RoamadomeSerialPortTest, TestPositionPrefix_CouldMatchMultipleTimes)
 
 }  // namespace ros2_roamadome
 
-int main(int argc, char** argv)
+int main(int argc, char ** argv)
 {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

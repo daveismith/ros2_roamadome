@@ -13,8 +13,8 @@
 namespace ros2_roamadome
 {
 
-RoamadomeSerialPort::RoamadomeSerialPort(const std::string& port_name)
-  : portName_(port_name), serialFd_(-1)
+RoamadomeSerialPort::RoamadomeSerialPort(const std::string & port_name)
+: portName_(port_name), serialFd_(-1)
 {
 }
 
@@ -137,7 +137,7 @@ bool RoamadomeSerialPort::configurePort(uint32_t baud_rate)
   return true;
 }
 
-bool RoamadomeSerialPort::sendCommand(const std::string& command)
+bool RoamadomeSerialPort::sendCommand(const std::string & command)
 {
   if (!isOpen()) {
     std::cerr << "Cannot send command: port not open" << std::endl;
@@ -189,7 +189,7 @@ bool RoamadomeSerialPort::read()
   // Process each complete line
   std::vector<std::string> unhandledLines;
 
-  for (const auto& line : lines) {
+  for (const auto & line : lines) {
     // Skip empty lines
     if (line.empty()) {
       continue;
@@ -212,7 +212,7 @@ bool RoamadomeSerialPort::read()
       notifyUnhandledLineObservers(unhandledLines[0]);
     } else {
       // Log multiple unhandled lines as a consolidated message
-      for (const auto& line : unhandledLines) {
+      for (const auto & line : unhandledLines) {
         notifyUnhandledLineObservers(line);
       }
     }
@@ -222,7 +222,7 @@ bool RoamadomeSerialPort::read()
 }
 
 std::optional<std::pair<uint32_t, double>> RoamadomeSerialPort::parsePositionLine(
-  const std::string& line)
+  const std::string & line)
 {
   const std::string searchStr = "DOME POSITION: ";
   auto pos = line.find(searchStr);
@@ -268,7 +268,7 @@ std::optional<std::pair<uint32_t, double>> RoamadomeSerialPort::parsePositionLin
 
     return std::make_pair(degrees, radians);
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception & e) {
     std::cerr << "Warning: Failed to parse position from line: " << line << " (" << e.what()
               << ")" << std::endl;
     return std::nullopt;
@@ -276,7 +276,7 @@ std::optional<std::pair<uint32_t, double>> RoamadomeSerialPort::parsePositionLin
 }
 
 std::pair<std::vector<std::string>, std::string> RoamadomeSerialPort::splitLines(
-  const std::string& data)
+  const std::string & data)
 {
   std::vector<std::string> lines;
   std::string remainder;
@@ -307,7 +307,7 @@ std::pair<std::vector<std::string>, std::string> RoamadomeSerialPort::splitLines
   return {lines, remainder};
 }
 
-std::string RoamadomeSerialPort::trim(const std::string& str)
+std::string RoamadomeSerialPort::trim(const std::string & str)
 {
   // Find first non-whitespace
   size_t start = str.find_first_not_of(" \t\r\n");
@@ -347,7 +347,7 @@ void RoamadomeSerialPort::notifyVelocityObservers(double rad_per_sec)
   }
 }
 
-void RoamadomeSerialPort::notifyUnhandledLineObservers(const std::string& line)
+void RoamadomeSerialPort::notifyUnhandledLineObservers(const std::string & line)
 {
   // Call registered callback
   if (unhandledLineCallback_) {
