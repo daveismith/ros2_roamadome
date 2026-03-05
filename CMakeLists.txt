@@ -20,7 +20,7 @@ find_package(pluginlib REQUIRED)
 # build library
 add_library(ros2_roamadome src/roamadome_control.cpp)
 add_library(ros2_roamadome::roamadome_control ALIAS ros2_roamadome)
-target_compile_features(ros2_roamadome PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
+target_compile_features(ros2_roamadome PUBLIC c_std_99 cxx_std_20)  # Require C99 and C++20
 target_include_directories(ros2_roamadome PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)

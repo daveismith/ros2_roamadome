@@ -53,6 +53,16 @@ private:
 
   double cmd_position_;
   double cmd_velocity_;
+
+  std::string serialPort_;
+  uint32_t serialBaud_;
+
+  int serialFd_;
+
+  int openSerialPort(const char* aPortName);
+  void closeSerialPort(int aFd);
+  bool configureSerialPort(int aFd, int aBaudRate);
+
 };
 
 }  // namespace roamadome_control
