@@ -4,8 +4,11 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "ros2_roamadome/visibility_control.h"
+#include "ros2_roamadome/roamadome_serial_port.hpp"
 #include "hardware_interface/actuator_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
+
+#include <memory>
 
 using hardware_interface::return_type;
 
@@ -54,14 +57,9 @@ private:
   double cmd_position_;
   double cmd_velocity_;
 
+  std::unique_ptr<RoamadomeSerialPort> serialHandler_;
   std::string serialPort_;
   uint32_t serialBaud_;
-
-  int serialFd_;
-
-  int openSerialPort(const char* aPortName);
-  void closeSerialPort(int aFd);
-  bool configureSerialPort(int aFd, int aBaudRate);
 
 };
 
