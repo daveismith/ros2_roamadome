@@ -46,7 +46,32 @@ public:
     const rclcpp::Time & time,
     const rclcpp::Duration & period) override;
 
+  hardware_interface::return_type prepare_command_mode_switch(
+    const std::vector<std::string> & start_interfaces,
+    const std::vector<std::string> & stop_interfaces) override;
+
+  hardware_interface::return_type perform_command_mode_switch(
+    const std::vector<std::string> & start_interfaces,
+    const std::vector<std::string> & stop_interfaces) override;
+
 private:
+  // Command mode enumeration
+  enum class CommandMode
+  {
+    IDLE,
+    POSITION,
+    VELOCITY
+  };
+
+  // Helper methods for command handling
+  uint32_t normalizeAngleDegrees(double radians) const;
+  double radiansToDegrees(double radians) const;
+  int32_t velocityToPercentage(double rad_per_sec) const;
+  bool sendPositionCommand(uint32_t degrees);
+  bool sendVelocityCommand(int32_t percentage);
+  bool sendStopCommand();
+
+  // Logging and hardware connection
   rclcpp::Logger logger_;
 
   std::vector<std::string> exported_state_interface_names_;
@@ -60,6 +85,13 @@ private:
 
   double cmd_position_;
   double cmd_velocity_;
+
+  // Command mode state tracking
+  CommandMode currentMode_ = CommandMode::IDLE;
+  CommandMode previousMode_ = CommandMode::IDLE;
+  double lastSentPosition_ = -1.0;  // Track last sent position to avoid redundant commands
+  double lastSentVelocity_ = 0.0;   // Track last sent velocity to avoid redundant commands
+  double maxSpeedRadPerSec_ = 3.14;  // Default: ~180°/s (configurable via parameter)
 
   std::unique_ptr<RoamadomeSerialPort> serialHandler_;
   std::string serialPort_;

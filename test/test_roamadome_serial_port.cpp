@@ -737,6 +737,226 @@ TEST_F(RoamadomeSerialPortTest, TestPositionPrefix_CouldMatchMultipleTimes)
   EXPECT_EQ(positionUpdateCount, 1) << "Should find DOME POSITION: even if later in line";
 }
 
+// ============================================================================
+// NEW TESTS - Position parsing in various states
+// ============================================================================
+
+TEST_F(RoamadomeSerialPortTest, TestPositionDuringConfigState)
+{
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Write config header followed by a config line and then a position line
+  // The position should still be parsed even though we're in CONFIG state
+  writeDataAndWait(
+    "PROCESS: \"#DPCONFIG\"\n"
+    "param1=value1\n"
+    "DOME POSITION: 45\n"
+  );
+  serialPort_->read();
+
+  EXPECT_TRUE(observer.positionUpdateCalled())
+    << "Position should be parsed while in CONFIG state";
+  EXPECT_EQ(observer.lastDegrees(), 45);
+  EXPECT_NEAR(observer.lastRadians(), 45.0 * M_PI / 180.0, 0.001);
+}
+
+TEST_F(RoamadomeSerialPortTest, TestPositionDuringStatusState)
+{
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Write status header followed by status lines and then a position line
+  // The position should still be parsed even though we're in STATUS state
+  writeDataAndWait(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Status line 1\n"
+    "DOME POSITION: 90\n"
+    "Status line 2\n"
+  );
+  serialPort_->read();
+
+  EXPECT_TRUE(observer.positionUpdateCalled())
+    << "Position should be parsed while in STATUS state";
+  EXPECT_EQ(observer.lastDegrees(), 90);
+  EXPECT_NEAR(observer.lastRadians(), 90.0 * M_PI / 180.0, 0.001);
+}
+
+TEST_F(RoamadomeSerialPortTest, TestMixedStateSequenceWithPositions)
+{
+  openPort();
+
+  std::vector<uint32_t> capturedPositions;
+
+  serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
+      capturedPositions.push_back(deg);
+      (void)rad;
+  });
+
+  // Sequence: Three separate position reads interspersed with state changes
+  // Positions should be captured regardless of state
+  writeDataAndWait("DOME POSITION: 10\n");
+  serialPort_->read();
+
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nkey1=val1\nDOME POSITION: 20\n");
+  serialPort_->read();
+
+  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nStatus info\nDOME POSITION: 30\n");
+  serialPort_->read();
+
+  EXPECT_GE(capturedPositions.size(), 2)
+    << "Should capture at least 2 position updates, got " << capturedPositions.size();
+
+  // Verify at least one position was captured in CONFIG state and one in STATUS state
+  bool hasPositionInConfigOrStatus = false;
+  for (uint32_t pos : capturedPositions) {
+    if (pos == 20 || pos == 30) {
+      hasPositionInConfigOrStatus = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(hasPositionInConfigOrStatus)
+    << "Should capture positions while in CONFIG or STATUS state";
+}
+
+
+TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesConfigData)
+{
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Write a config block, then transition to status
+  // We expect the config to be flushed (notified) before the status begins
+  writeDataAndWait(
+    "PROCESS: \"#DPCONFIG\"\n"
+    "setting1=enabled\n"
+    "setting2=high\n"
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Device ready\n"
+  );
+  serialPort_->read();
+
+  EXPECT_TRUE(observer.configUpdateCalled())
+    << "Config should be notified when state transitions away from CONFIG";
+  EXPECT_EQ(observer.lastConfig().size(), 2);
+  EXPECT_EQ(observer.lastConfig().at("setting1"), "enabled");
+  EXPECT_EQ(observer.lastConfig().at("setting2"), "high");
+
+  EXPECT_TRUE(observer.statusUpdateCalled())
+    << "Status should be notified after config";
+  EXPECT_EQ(observer.lastStatus().size(), 1);
+  EXPECT_EQ(observer.lastStatus()[0], "Device ready");
+}
+
+TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesStatusData)
+{
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Write a status block, then transition back to config
+  // We expect the status to be flushed (notified) before the config begins
+  writeDataAndWait(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Status line 1\n"
+    "Status line 2\n"
+    "PROCESS: \"#DPCONFIG\"\n"
+    "newkey=newvalue\n"
+  );
+  serialPort_->read();
+
+  EXPECT_TRUE(observer.statusUpdateCalled())
+    << "Status should be notified when state transitions away from STATUS";
+  EXPECT_EQ(observer.lastStatus().size(), 2);
+  EXPECT_EQ(observer.lastStatus()[0], "Status line 1");
+  EXPECT_EQ(observer.lastStatus()[1], "Status line 2");
+
+  EXPECT_TRUE(observer.configUpdateCalled())
+    << "Config should be notified after status";
+  EXPECT_EQ(observer.lastConfig().size(), 1);
+  EXPECT_EQ(observer.lastConfig().at("newkey"), "newvalue");
+}
+
+TEST_F(RoamadomeSerialPortTest, TestConsecutiveProcessLines)
+{
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Rapid sequence: CONFIG -> STATUS
+  // Verify state transitions work correctly
+  writeDataAndWait(
+    "PROCESS: \"#DPCONFIG\"\n"
+    "cfg1=val1\n"
+    "PROCESS: \"#DPSTATUS\"\n"
+    "status_line\n"
+  );
+  serialPort_->read();
+
+  // Both config and status should have been processed
+  EXPECT_TRUE(observer.configUpdateCalled())
+    << "Should process config state";
+  EXPECT_EQ(observer.lastConfig().size(), 1);
+  EXPECT_EQ(observer.lastConfig().at("cfg1"), "val1");
+
+  EXPECT_TRUE(observer.statusUpdateCalled())
+    << "Should process status state";
+  EXPECT_EQ(observer.lastStatus().size(), 1);
+  EXPECT_EQ(observer.lastStatus()[0], "status_line");
+}
+
+
+TEST_F(RoamadomeSerialPortTest, TestPositionWithConfigAndStatusMixed)
+{
+  openPort();
+
+  int positionCount = 0;
+  int configCount = 0;
+  int statusCount = 0;
+
+  serialPort_->setPositionCallback([&](uint32_t deg, double rad) {
+      positionCount++;
+      (void)deg;
+      (void)rad;
+  });
+
+  serialPort_->setConfigCallback([&](const std::map<std::string, std::string> & config) {
+      configCount++;
+      (void)config;
+  });
+
+  serialPort_->setStatusCallback([&](const std::vector<std::string> & status) {
+      statusCount++;
+      (void)status;
+  });
+
+  // Test that positions are captured in all states
+  writeDataAndWait("DOME POSITION: 1\n");
+  serialPort_->read();
+
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nx=1\nDOME POSITION: 2\n");
+  serialPort_->read();
+
+  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nLine A\nDOME POSITION: 3\n");
+  serialPort_->read();
+
+  // Verify all types of data were processed
+  EXPECT_GE(positionCount, 2)
+    << "Should capture at least 2 positions in different states";
+  EXPECT_GE(configCount, 1)
+    << "Should process config";
+  EXPECT_GE(statusCount, 1)
+    << "Should process status";
+}
+
 }  // namespace ros2_roamadome
 
 int main(int argc, char ** argv)

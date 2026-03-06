@@ -201,41 +201,63 @@ bool RoamadomeSerialPort::read()
       continue;
     }
 
-    // Check for command start
-    if (line.find("PROCESS: \"#DPCONFIG\"") != std::string::npos) {
-      // Notify previous config if any
+    if (line.starts_with("PROCESS: \"")) {
+        // Notify any pending data at end of read
       if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
         notifyConfigObservers(currentConfig_);
+        currentConfig_.clear();
+      } else if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
+        notifyStatusObservers(currentStatus_);
+        currentStatus_.clear();
+      }
+
+        // clear out any existing state
+      parseState_ = ParseState::NONE;
+    }
+
+    // Check if this line starts a new PROCESS command
+    // If so, flush any pending data from the previous state and transition
+    if (line.find("PROCESS: \"#DPCONFIG\"") != std::string::npos) {
+      // Flush previous state if needed
+      if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
+        notifyStatusObservers(currentStatus_);
+        currentStatus_.clear();
       }
       parseState_ = ParseState::CONFIG;
       currentConfig_.clear();
-    } else if (line.find("PROCESS: \"#DPSTATUS\"") != std::string::npos) {
-      // Notify previous status if any
-      if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
-        notifyStatusObservers(currentStatus_);
+      continue;  // Skip further processing of this PROCESS line
+    }
+
+    if (line.find("PROCESS: \"#DPSTATUS\"") != std::string::npos) {
+      // Flush previous state if needed
+      if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
+        notifyConfigObservers(currentConfig_);
+        currentConfig_.clear();
       }
       parseState_ = ParseState::STATUS;
       currentStatus_.clear();
-    } else {
-      // Process based on current state
-      if (parseState_ == ParseState::CONFIG) {
-        auto kv = parseConfigLine(line);
-        if (kv) {
-          currentConfig_[kv->first] = kv->second;
-        }
-      } else if (parseState_ == ParseState::STATUS) {
-        currentStatus_.push_back(line);
-      } else {
-        // Try to parse as position
-        auto positionData = parsePositionLine(line);
-        if (positionData) {
-          auto [degrees, radians] = positionData.value();
-          notifyPositionObservers(degrees, radians);
-        } else {
-          // Line doesn't match known patterns
-          notifyUnhandledLineObservers(line);
-        }
+      continue;  // Skip further processing of this PROCESS line
+    }
+
+    // Always try to parse position line first (regardless of state)
+    auto positionData = parsePositionLine(line);
+    if (positionData) {
+      auto [degrees, radians] = positionData.value();
+      notifyPositionObservers(degrees, radians);
+      continue;  // Successfully parsed position, skip remaining processing
+    }
+
+    // Process based on current state for non-position lines
+    if (parseState_ == ParseState::CONFIG) {
+      auto kv = parseConfigLine(line);
+      if (kv) {
+        currentConfig_[kv->first] = kv->second;
       }
+    } else if (parseState_ == ParseState::STATUS) {
+      currentStatus_.push_back(line);
+    } else {
+      // In NONE state, line doesn't match known patterns
+      notifyUnhandledLineObservers(line);
     }
   }
 

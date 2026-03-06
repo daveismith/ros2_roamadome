@@ -4,6 +4,7 @@
 #include <string>
 #include <time.h>
 #include <unistd.h>
+#include <cmath>
 
 namespace ros2_roamadome
 {
@@ -59,6 +60,27 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     RCLCPP_ERROR(logger_, "serial_baud has invalid format");
     return hardware_interface::CallbackReturn::ERROR;
   }
+
+  // Parse optional max_speed_rad_per_sec parameter
+  try {
+    auto it = info_.hardware_parameters.find("max_speed_rad_per_sec");
+    if (it != info_.hardware_parameters.end()) {
+      maxSpeedRadPerSec_ = std::stod(it->second);
+      if (maxSpeedRadPerSec_ <= 0.0) {
+        RCLCPP_WARN(logger_, "max_speed_rad_per_sec must be positive, using default 3.14");
+        maxSpeedRadPerSec_ = 3.14;
+      }
+    } else {
+      RCLCPP_INFO(logger_, "max_speed_rad_per_sec not found, using default 3.14 rad/s");
+      maxSpeedRadPerSec_ = 3.14;
+    }
+  } catch (const std::invalid_argument & ia) {
+    RCLCPP_WARN(logger_, "max_speed_rad_per_sec has invalid format, using default 3.14");
+    maxSpeedRadPerSec_ = 3.14;
+  }
+
+  RCLCPP_INFO(logger_, "Maximum speed configured: %.4f rad/s (%.2f°/s)",
+              maxSpeedRadPerSec_, radiansToDegrees(maxSpeedRadPerSec_));
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -263,10 +285,175 @@ hardware_interface::return_type RoamadomeControl::write(
   (void) time;
   (void) period;
 
-  //RCLCPP_INFO(logger_, "write called with time: %f and period: %f", time.seconds(), period.seconds());
-  //RCLCPP_INFO(logger_, "write called. Command position: %f, Command velocity: %f", cmd_position_, cmd_velocity_);
+  if (!serialHandler_ || !serialHandler_->isOpen()) {
+    return return_type::OK;
+  }
+
+  // Determine which command mode is active and send appropriate command
+  if (currentMode_ == CommandMode::POSITION) {
+    // Position command: convert radians to degrees and normalize to [0, 359]
+    uint32_t target_degrees = normalizeAngleDegrees(cmd_position_);
+
+    // Only send if position changed significantly (avoid redundant commands)
+    if (lastSentPosition_ < 0 || std::fabs(cmd_position_ - lastSentPosition_) > 0.01) {
+      if (sendPositionCommand(target_degrees)) {
+        lastSentPosition_ = cmd_position_;
+        RCLCPP_DEBUG(logger_, "Sent position command: %u°", target_degrees);
+      }
+    }
+  } else if (currentMode_ == CommandMode::VELOCITY) {
+    // Velocity command: convert rad/s to percentage [-100, 100]
+    int32_t target_percentage = velocityToPercentage(cmd_velocity_);
+
+    // Only send if velocity changed significantly (avoid redundant commands)
+    if (std::fabs(cmd_velocity_ - lastSentVelocity_) > 0.01) {
+      if (sendVelocityCommand(target_percentage)) {
+        lastSentVelocity_ = cmd_velocity_;
+        RCLCPP_DEBUG(logger_, "Sent velocity command: %d%%", target_percentage);
+      }
+    }
+  }
+  // IDLE mode: don't send any commands
 
   return return_type::OK;
+}
+
+hardware_interface::return_type RoamadomeControl::prepare_command_mode_switch(
+  const std::vector<std::string> & start_interfaces,
+  const std::vector<std::string> & stop_interfaces)
+{
+  (void) stop_interfaces;  // May be used for validation in future
+
+  // Validate that we're not trying to start both position and velocity
+  bool position_starting = false;
+  bool velocity_starting = false;
+
+  for (const auto & interface : start_interfaces) {
+    if (interface.find("position") != std::string::npos) {
+      position_starting = true;
+    } else if (interface.find("velocity") != std::string::npos) {
+      velocity_starting = true;
+    }
+  }
+
+  // Ensure mutual exclusivity: can't have both position and velocity starting
+  if (position_starting && velocity_starting) {
+    RCLCPP_ERROR(logger_, "Cannot switch to both position and velocity modes simultaneously");
+    return return_type::ERROR;
+  }
+
+  RCLCPP_DEBUG(logger_, "Preparing command mode switch - Position: %d, Velocity: %d",
+               position_starting, velocity_starting);
+
+  return return_type::OK;
+}
+
+hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
+  const std::vector<std::string> & start_interfaces,
+  const std::vector<std::string> & stop_interfaces)
+{
+  (void) stop_interfaces;  // May be used for validation in future
+
+  // Determine the new mode based on starting interfaces
+  CommandMode new_mode = CommandMode::IDLE;
+
+  for (const auto & interface : start_interfaces) {
+    if (interface.find("position") != std::string::npos) {
+      new_mode = CommandMode::POSITION;
+      break;
+    } else if (interface.find("velocity") != std::string::npos) {
+      new_mode = CommandMode::VELOCITY;
+      break;
+    }
+  }
+
+  // If switching away from an active mode, send stop command
+  if (currentMode_ != CommandMode::IDLE && new_mode != currentMode_) {
+    RCLCPP_INFO(logger_, "Mode switch detected, sending stop command");
+    sendStopCommand();
+  }
+
+  previousMode_ = currentMode_;
+  currentMode_ = new_mode;
+
+  RCLCPP_INFO(logger_, "Command mode switched to: %s",
+              currentMode_ == CommandMode::POSITION ? "POSITION" :
+              currentMode_ == CommandMode::VELOCITY ? "VELOCITY" : "IDLE");
+
+  return return_type::OK;
+}
+
+uint32_t RoamadomeControl::normalizeAngleDegrees(double radians) const
+{
+  // Convert radians to degrees
+  double degrees = radiansToDegrees(radians);
+
+  // Normalize to [0, 359] using modulo arithmetic
+  // First convert to integer to avoid floating point issues
+  int32_t deg_int = static_cast<int32_t>(degrees);
+
+  // Apply modulo to handle negative angles and > 359
+  deg_int = deg_int % 360;
+  if (deg_int < 0) {
+    deg_int += 360;
+  }
+
+  return static_cast<uint32_t>(deg_int);
+}
+
+double RoamadomeControl::radiansToDegrees(double radians) const
+{
+  return radians * (180.0 / M_PI);
+}
+
+int32_t RoamadomeControl::velocityToPercentage(double rad_per_sec) const
+{
+  // Scale rad/s to [-100, 100] percentage based on maxSpeedRadPerSec_
+  double percentage = (rad_per_sec / maxSpeedRadPerSec_) * 100.0;
+
+  // Clamp to valid range
+  if (percentage > 100.0) {
+    percentage = 100.0;
+  } else if (percentage < -100.0) {
+    percentage = -100.0;
+  }
+
+  return static_cast<int32_t>(std::round(percentage));
+}
+
+bool RoamadomeControl::sendPositionCommand(uint32_t degrees)
+{
+  if (!serialHandler_ || !serialHandler_->isOpen()) {
+    RCLCPP_WARN(logger_, "Serial handler not available for position command");
+    return false;
+  }
+
+  // Format: :DPA<degrees> where degrees is 0-359
+  std::string command = std::format(":DPA{}\n", degrees);
+  return serialHandler_->sendCommand(command);
+}
+
+bool RoamadomeControl::sendVelocityCommand(int32_t percentage)
+{
+  if (!serialHandler_ || !serialHandler_->isOpen()) {
+    RCLCPP_WARN(logger_, "Serial handler not available for velocity command");
+    return false;
+  }
+
+  // Format: :DPR<speed> where speed is -100 to 100
+  std::string command = std::format(":DPR{}\n", percentage);
+  return serialHandler_->sendCommand(command);
+}
+
+bool RoamadomeControl::sendStopCommand()
+{
+  if (!serialHandler_ || !serialHandler_->isOpen()) {
+    RCLCPP_WARN(logger_, "Serial handler not available for stop command");
+    return false;
+  }
+
+  // Send stop command: :DPR0 (0% velocity)
+  return serialHandler_->sendCommand(":DPR0\n");
 }
 
 }  // namespace roamadome_control
