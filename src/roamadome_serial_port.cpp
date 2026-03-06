@@ -9,12 +9,14 @@
 #include <cmath>
 #include <sstream>
 #include <iostream>
+#include <sys/ioctl.h>
 
 namespace ros2_roamadome
 {
 
-RoamadomeSerialPort::RoamadomeSerialPort(const std::string & port_name)
-: portName_(port_name), serialFd_(-1)
+RoamadomeSerialPort::RoamadomeSerialPort(const std::string & port_name, bool exclusive_access)
+: portName_(port_name), serialFd_(-1), parseState_(ParseState::NONE),
+  exclusiveAccess_(exclusive_access)
 {
 }
 
@@ -40,6 +42,18 @@ bool RoamadomeSerialPort::open()
 
   serialFd_ = fd;
   lineBuffer_.clear();
+
+  // Set exclusive access if requested
+  if (exclusiveAccess_) {
+    if (ioctl(serialFd_, TIOCEXCL) == -1) {
+      std::cerr << "Error setting exclusive access on " << portName_ << ": " << strerror(errno) <<
+        std::endl;
+      ::close(serialFd_);
+      serialFd_ = -1;
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -80,6 +94,9 @@ bool RoamadomeSerialPort::configurePort(uint32_t baud_rate)
       break;
     case 38400:
       baud = B38400;
+      break;
+    case 115200:
+      baud = B115200;
       break;
     default:
       std::cerr << "Unsupported baud rate: " << baud_rate << std::endl;
@@ -178,38 +195,72 @@ bool RoamadomeSerialPort::read()
   lineBuffer_ = remainder;
 
   // Process each complete line
-  std::vector<std::string> unhandledLines;
-
   for (const auto & line : lines) {
     // Skip empty lines
     if (line.empty()) {
       continue;
     }
 
-    // Try to parse as position
-    auto positionData = parsePositionLine(line);
-    if (positionData) {
-      auto [degrees, radians] = positionData.value();
-      notifyPositionObservers(degrees, radians);
+    // Check for command start
+    if (line.find("PROCESS: \"#DPCONFIG\"") != std::string::npos) {
+      // Notify previous config if any
+      if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
+        notifyConfigObservers(currentConfig_);
+      }
+      parseState_ = ParseState::CONFIG;
+      currentConfig_.clear();
+    } else if (line.find("PROCESS: \"#DPSTATUS\"") != std::string::npos) {
+      // Notify previous status if any
+      if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
+        notifyStatusObservers(currentStatus_);
+      }
+      parseState_ = ParseState::STATUS;
+      currentStatus_.clear();
     } else {
-      // Line doesn't match position pattern
-      unhandledLines.push_back(line);
-    }
-  }
-
-  // Log consolidated unhandled lines
-  if (!unhandledLines.empty()) {
-    if (unhandledLines.size() == 1) {
-      notifyUnhandledLineObservers(unhandledLines[0]);
-    } else {
-      // Log multiple unhandled lines as a consolidated message
-      for (const auto & line : unhandledLines) {
-        notifyUnhandledLineObservers(line);
+      // Process based on current state
+      if (parseState_ == ParseState::CONFIG) {
+        auto kv = parseConfigLine(line);
+        if (kv) {
+          currentConfig_[kv->first] = kv->second;
+        }
+      } else if (parseState_ == ParseState::STATUS) {
+        currentStatus_.push_back(line);
+      } else {
+        // Try to parse as position
+        auto positionData = parsePositionLine(line);
+        if (positionData) {
+          auto [degrees, radians] = positionData.value();
+          notifyPositionObservers(degrees, radians);
+        } else {
+          // Line doesn't match known patterns
+          notifyUnhandledLineObservers(line);
+        }
       }
     }
   }
 
+  // Notify any pending data at end of read
+  if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
+    notifyConfigObservers(currentConfig_);
+    currentConfig_.clear();
+  } else if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
+    notifyStatusObservers(currentStatus_);
+    currentStatus_.clear();
+  }
+
   return true;
+}
+
+std::optional<std::pair<std::string, std::string>> RoamadomeSerialPort::parseConfigLine(
+  const std::string & line)
+{
+  size_t eqPos = line.find('=');
+  if (eqPos != std::string::npos) {
+    std::string key = trim(line.substr(0, eqPos));
+    std::string value = trim(line.substr(eqPos + 1));
+    return std::make_pair(key, value);
+  }
+  return std::nullopt;
 }
 
 std::optional<std::pair<uint32_t, double>> RoamadomeSerialPort::parsePositionLine(
@@ -348,6 +399,32 @@ void RoamadomeSerialPort::notifyUnhandledLineObservers(const std::string & line)
   // Call observer interface methods
   for (auto observer : observers_) {
     observer->onUnhandledLine(line);
+  }
+}
+
+void RoamadomeSerialPort::notifyConfigObservers(const std::map<std::string, std::string> & config)
+{
+  // Call registered callback
+  if (configCallback_) {
+    configCallback_(config);
+  }
+
+  // Call observer interface methods
+  for (auto observer : observers_) {
+    observer->onConfigUpdate(config);
+  }
+}
+
+void RoamadomeSerialPort::notifyStatusObservers(const std::vector<std::string> & status)
+{
+  // Call registered callback
+  if (statusCallback_) {
+    statusCallback_(status);
+  }
+
+  // Call observer interface methods
+  for (auto observer : observers_) {
+    observer->onStatusUpdate(status);
   }
 }
 

@@ -40,14 +40,30 @@ public:
     unhandledLineCount_++;
   }
 
+  void onConfigUpdate(const std::map<std::string, std::string> & config) override
+  {
+    configUpdateCalled_ = true;
+    lastConfig_ = config;
+  }
+
+  void onStatusUpdate(const std::vector<std::string> & status) override
+  {
+    statusUpdateCalled_ = true;
+    lastStatus_ = status;
+  }
+
   bool positionUpdateCalled() const {return positionUpdateCalled_;}
   bool velocityUpdateCalled() const {return velocityUpdateCalled_;}
   bool unhandledLineCalled() const {return unhandledLineCalled_;}
+  bool configUpdateCalled() const {return configUpdateCalled_;}
+  bool statusUpdateCalled() const {return statusUpdateCalled_;}
 
   uint32_t lastDegrees() const {return lastDegrees_;}
   double lastRadians() const {return lastRadians_;}
   double lastVelocity() const {return lastVelocity_;}
   std::string lastUnhandledLine() const {return lastUnhandledLine_;}
+  const std::map<std::string, std::string> & lastConfig() const {return lastConfig_;}
+  const std::vector<std::string> & lastStatus() const {return lastStatus_;}
 
   int positionUpdateCount() const {return positionUpdateCount_;}
   int unhandledLineCount() const {return unhandledLineCount_;}
@@ -57,10 +73,14 @@ public:
     positionUpdateCalled_ = false;
     velocityUpdateCalled_ = false;
     unhandledLineCalled_ = false;
+    configUpdateCalled_ = false;
+    statusUpdateCalled_ = false;
     lastDegrees_ = 0;
     lastRadians_ = 0.0;
     lastVelocity_ = 0.0;
     lastUnhandledLine_ = "";
+    lastConfig_.clear();
+    lastStatus_.clear();
     positionUpdateCount_ = 0;
     unhandledLineCount_ = 0;
   }
@@ -69,11 +89,15 @@ private:
   bool positionUpdateCalled_ = false;
   bool velocityUpdateCalled_ = false;
   bool unhandledLineCalled_ = false;
+  bool configUpdateCalled_ = false;
+  bool statusUpdateCalled_ = false;
 
   uint32_t lastDegrees_ = 0;
   double lastRadians_ = 0.0;
   double lastVelocity_ = 0.0;
   std::string lastUnhandledLine_;
+  std::map<std::string, std::string> lastConfig_;
+  std::vector<std::string> lastStatus_;
 
   int positionUpdateCount_ = 0;
   int unhandledLineCount_ = 0;
@@ -133,7 +157,7 @@ protected:
   {
     // Create a temporary pipe to simulate serial device
     pipe_ = std::make_unique<TemporaryPipe>();
-    serialPort_ = std::make_unique<RoamadomeSerialPort>(pipe_->path());
+    serialPort_ = std::make_unique<RoamadomeSerialPort>(pipe_->path(), false);  // Disable exclusive access for tests
   }
 
   void TearDown() override

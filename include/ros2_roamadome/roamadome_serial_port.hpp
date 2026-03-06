@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <map>
 
 namespace ros2_roamadome
 {
@@ -38,6 +39,18 @@ public:
    * @param line The unhandled line content
    */
   virtual void onUnhandledLine(const std::string & line) = 0;
+
+  /**
+   * @brief Called when config data is received from the device
+   * @param config Map of config key-value pairs
+   */
+  virtual void onConfigUpdate(const std::map<std::string, std::string> & config) = 0;
+
+  /**
+   * @brief Called when status data is received from the device
+   * @param status Vector of status lines
+   */
+  virtual void onStatusUpdate(const std::vector<std::string> & status) = 0;
 };
 
 /**
@@ -59,8 +72,9 @@ public:
   /**
    * @brief Construct a serial port handler
    * @param port_name Device path (e.g., "/dev/ttyACM1")
+   * @param exclusive_access Whether to request exclusive access to the port (default: true)
    */
-  explicit RoamadomeSerialPort(const std::string & port_name);
+  explicit RoamadomeSerialPort(const std::string & port_name, bool exclusive_access = true);
 
   /**
    * @brief Destructor - closes port if open
@@ -137,6 +151,24 @@ public:
   }
 
   /**
+   * @brief Register a callback for config updates
+   * @param callback Function called as callback(config_map)
+   */
+  void setConfigCallback(std::function<void(const std::map<std::string, std::string> &)> callback)
+  {
+    configCallback_ = callback;
+  }
+
+  /**
+   * @brief Register a callback for status updates
+   * @param callback Function called as callback(status_lines)
+   */
+  void setStatusCallback(std::function<void(const std::vector<std::string> &)> callback)
+  {
+    statusCallback_ = callback;
+  }
+
+  /**
    * @brief Register an observer interface for notifications
    * @param observer Pointer to observer (lifetime must outlive this object)
    */
@@ -152,10 +184,19 @@ private:
   int serialFd_;
   std::string lineBuffer_;
 
+  // Parsing state
+  enum class ParseState { NONE, CONFIG, STATUS };
+  ParseState parseState_;
+  bool exclusiveAccess_;
+  std::map<std::string, std::string> currentConfig_;
+  std::vector<std::string> currentStatus_;
+
   // Callbacks
   std::function<void(uint32_t, double)> positionCallback_;
   std::function<void(double)> velocityCallback_;
   std::function<void(const std::string &)> unhandledLineCallback_;
+  std::function<void(const std::map<std::string, std::string> &)> configCallback_;
+  std::function<void(const std::vector<std::string> &)> statusCallback_;
 
   // Observers
   std::vector<ISerialObserver *> observers_;
@@ -166,6 +207,13 @@ private:
    * @return optional pair of (degrees, radians) if found and valid, empty if not found or invalid
    */
   std::optional<std::pair<uint32_t, double>> parsePositionLine(const std::string & line);
+
+  /**
+   * @brief Parse a config line for key=value
+   * @param line The line to parse
+   * @return optional pair of (key, value) if found, empty otherwise
+   */
+  std::optional<std::pair<std::string, std::string>> parseConfigLine(const std::string & line);
 
   /**
    * @brief Split data into lines and extract remainder
@@ -199,6 +247,18 @@ private:
    * @param line The unhandled line
    */
   void notifyUnhandledLineObservers(const std::string & line);
+
+  /**
+   * @brief Notify all registered observers and callbacks of a config update
+   * @param config The config map
+   */
+  void notifyConfigObservers(const std::map<std::string, std::string> & config);
+
+  /**
+   * @brief Notify all registered observers and callbacks of a status update
+   * @param status The status lines
+   */
+  void notifyStatusObservers(const std::vector<std::string> & status);
 };
 
 }  // namespace ros2_roamadome

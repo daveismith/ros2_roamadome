@@ -65,11 +65,12 @@ private:
   std::string serialPort_;
   uint32_t serialBaud_;
 
-  const uint32_t mSupportedBaudRates[4] = {
+  const uint32_t mSupportedBaudRates[5] = {
     2400,
     9600,
     19200,
-    38400
+    38400,
+    115200
   };
 
 };

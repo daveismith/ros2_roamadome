@@ -49,8 +49,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     if (it != info_.hardware_parameters.end()) {
       serialBaud_ = static_cast<uint32_t>(std::stoul(it->second));
     } else {
-      RCLCPP_WARN(logger_, "serial_baud not found, defaulting to 38400");
-      serialBaud_ = 38400;
+      RCLCPP_WARN(logger_, "serial_baud not found, defaulting to 115200");
+      serialBaud_ = 115200;
     }
   } catch (const std::out_of_range & oor) {
     RCLCPP_ERROR(logger_, "serial_baud out of range");
@@ -66,7 +66,6 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
 hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   const rclcpp_lifecycle::State & previous_state)
 {
-  const char *status = "#DPSTATUS\n";
   char report_cmd[20] = {0};
   const struct timespec ts = {.tv_sec = 0, .tv_nsec = 500000000};
   uint32_t reportMs = (1000 / info_.rw_rate) - 5;
@@ -92,13 +91,31 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
       RCLCPP_DEBUG(logger_, "Unhandled serial line: %s", line.c_str());
         });
 
+    // Setup callback for config updates
+  serialHandler_->setConfigCallback(
+    [this](const std::map<std::string, std::string> & config) {
+      RCLCPP_INFO(logger_, "Config received:");
+      for (const auto & [key, value] : config) {
+        RCLCPP_INFO(logger_, "  %s = %s", key.c_str(), value.c_str());
+      }
+        });
+
+    // Setup callback for status updates
+  serialHandler_->setStatusCallback(
+    [this](const std::vector<std::string> & status) {
+      RCLCPP_INFO(logger_, "Status received:");
+      for (const auto & line : status) {
+        RCLCPP_INFO(logger_, "  %s", line.c_str());
+      }
+        });
+
     // Open the serial port
   if (!serialHandler_->open()) {
     RCLCPP_ERROR(logger_, "Failed to open serial port: %s", serialPort_.c_str());
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  std::string aBaudCommand = std::format("#DPSERIALBAUD{}", serialBaud_);
+  std::string aBaudCommand = std::format("#DPSERIALBAUD{}\n", serialBaud_);
   RCLCPP_INFO(logger_, "Baud Command is %s", aBaudCommand.c_str());
   for (size_t idx = 0; idx < sizeof(mSupportedBaudRates) / sizeof(mSupportedBaudRates[0]); idx++) {
     uint32_t targetBaud = mSupportedBaudRates[idx];
@@ -123,9 +140,13 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     serialHandler_->close();
     return hardware_interface::CallbackReturn::ERROR;
   }
+  nanosleep(&ts, NULL);
 
-    // Send initialization commands
-  serialHandler_->sendCommand(status);
+  // Send initialization commands
+  serialHandler_->sendCommand(std::string("#DPSTATUS\n"));
+  nanosleep(&ts, NULL);
+
+  serialHandler_->sendCommand(std::string("#DPCONFIG\n"));
   nanosleep(&ts, NULL);
 
     // Configure reporting
@@ -146,16 +167,16 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
 hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   const rclcpp_lifecycle::State & previous_state)
 {
-  const char *report = "#DPREPORT0\n";
-  const struct timespec ts = {.tv_sec = 0, .tv_nsec = 500000000};
+  const struct timespec ts = {.tv_sec = 1, .tv_nsec = 0};
 
   RCLCPP_INFO(logger_, "Deactivating RoamadomeControl from state: %s",
       previous_state.label().c_str());
 
   if (serialHandler_) {
-    serialHandler_->sendCommand(report);
+    serialHandler_->sendCommand("#DPREPORT0\n");
     nanosleep(&ts, NULL);
     serialHandler_->close();
+    serialHandler_ = NULL;
   }
 
   return hardware_interface::CallbackReturn::SUCCESS;
