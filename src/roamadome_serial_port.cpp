@@ -72,9 +72,6 @@ bool RoamadomeSerialPort::configurePort(uint32_t baud_rate)
     case 2400:
       baud = B2400;
       break;
-    case 4800:
-      baud = B4800;
-      break;
     case 9600:
       baud = B9600;
       break;
@@ -83,12 +80,6 @@ bool RoamadomeSerialPort::configurePort(uint32_t baud_rate)
       break;
     case 38400:
       baud = B38400;
-      break;
-    case 57600:
-      baud = B57600;
-      break;
-    case 115200:
-      baud = B115200;
       break;
     default:
       std::cerr << "Unsupported baud rate: " << baud_rate << std::endl;

@@ -1,5 +1,7 @@
 #include "ros2_roamadome/roamadome_control.hpp"
+#include <format>
 #include <iostream>
+#include <string>
 #include <time.h>
 #include <unistd.h>
 
@@ -96,7 +98,26 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  std::string aBaudCommand = std::format("#DPSERIALBAUD{}", serialBaud_);
+  RCLCPP_INFO(logger_, "Baud Command is %s", aBaudCommand.c_str());
+  for (size_t idx = 0; idx < sizeof(mSupportedBaudRates) / sizeof(mSupportedBaudRates[0]); idx++) {
+    uint32_t targetBaud = mSupportedBaudRates[idx];
+
     // Configure baud rate and port settings
+    if (!serialHandler_->configurePort(targetBaud)) {
+      RCLCPP_ERROR(logger_, "Failed to configure serial port baud rate: %u", serialBaud_);
+      serialHandler_->close();
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (!serialHandler_->sendCommand(aBaudCommand)) {
+      RCLCPP_ERROR(logger_, "Failed to send baud configuration command");
+      serialHandler_->close();
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+    nanosleep(&ts, NULL);
+  }
+
   if (!serialHandler_->configurePort(serialBaud_)) {
     RCLCPP_ERROR(logger_, "Failed to configure serial port baud rate: %u", serialBaud_);
     serialHandler_->close();

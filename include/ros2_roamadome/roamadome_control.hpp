@@ -65,6 +65,13 @@ private:
   std::string serialPort_;
   uint32_t serialBaud_;
 
+  const uint32_t mSupportedBaudRates[4] = {
+    2400,
+    9600,
+    19200,
+    38400
+  };
+
 };
 
 }  // namespace roamadome_control
