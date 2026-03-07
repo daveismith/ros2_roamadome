@@ -79,6 +79,14 @@ if(BUILD_TESTING)
     $<INSTALL_INTERFACE:include>
   )
   target_link_libraries(test_roamadome_serial_port ros2_roamadome)
+
+  # Unit tests for RoamadomeControl
+  ament_add_gtest(test_roamadome_control test/test_roamadome_control.cpp)
+  target_include_directories(test_roamadome_control PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_roamadome_control ros2_roamadome)
 endif()
 
 ament_export_include_directories(

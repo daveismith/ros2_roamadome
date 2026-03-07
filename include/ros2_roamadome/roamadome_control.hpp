@@ -105,6 +105,61 @@ private:
     115200
   };
 
+  // Joint naming - read from URDF during initialization
+  std::string joint_name_;
+
+  // Inner class: Observer for serial port events
+  class SerialEventHandler : public ISerialObserver
+  {
+public:
+    SerialEventHandler(RoamadomeControl * controller)
+    : controller_(controller)
+    {
+    }
+
+    virtual ~SerialEventHandler() = default;
+
+    void onPositionUpdate(uint32_t degrees, double radians) override
+    {
+      controller_->position_ = radians;
+      RCLCPP_DEBUG(
+        controller_->logger_,
+        "Position updated: %u° = %.4f rad", degrees, radians);
+    }
+
+    void onVelocityUpdate(double rad_per_sec) override
+    {
+      (void)rad_per_sec;
+      // Device does not send velocity updates, this is a no-op
+    }
+
+    void onUnhandledLine(const std::string & line) override
+    {
+      RCLCPP_DEBUG(controller_->logger_, "Unhandled serial line: %s", line.c_str());
+    }
+
+    void onConfigUpdate(const std::map<std::string, std::string> & config) override
+    {
+      RCLCPP_INFO(controller_->logger_, "Config received:");
+      for (const auto & [key, value] : config) {
+        RCLCPP_INFO(controller_->logger_, "  %s = %s", key.c_str(), value.c_str());
+      }
+    }
+
+    void onStatusUpdate(const std::vector<std::string> & status) override
+    {
+      RCLCPP_INFO(controller_->logger_, "Status received:");
+      for (const auto & line : status) {
+        RCLCPP_INFO(controller_->logger_, "  %s", line.c_str());
+      }
+    }
+
+private:
+    RoamadomeControl * controller_;
+  };
+
+  std::unique_ptr<SerialEventHandler> serialEventHandler_;
+
 };
 
 }  // namespace roamadome_control

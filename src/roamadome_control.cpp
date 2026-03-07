@@ -29,6 +29,22 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  // Note: info_ is inherited from ActuatorInterface and already populated by parent on_init()
+  // Validate that exactly one joint is configured
+  if (info_.joints.size() != 1) {
+    RCLCPP_ERROR(
+      logger_,
+      "RoamadomeControl supports exactly 1 joint, but URDF defines %zu joints",
+      info_.joints.size());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  // Extract joint name from URDF configuration
+  joint_name_ = info_.joints[0].name;
+  RCLCPP_INFO(
+    logger_,
+    "RoamadomeControl configured for joint: '%s'", joint_name_.c_str());
+
     //RCLCPP_INFO(logger_, "Initializing RoamadomeControl with params: %s", params.name.c_str());
   RCLCPP_INFO(logger_, "Initializing RoamadomeControl with params: %s", info_.name.c_str());
 
@@ -100,38 +116,11 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     // Create and setup the serial handler
   serialHandler_ = std::make_unique<RoamadomeSerialPort>(serialPort_);
 
-    // Setup callbacks for position updates from device
-  serialHandler_->setPositionCallback(
-    [this](uint32_t degrees, double radians) {
-      position_ = radians;
-      RCLCPP_DEBUG(logger_, "Position updated: %u° = %.4f rad", degrees, radians);
-        });
+  // Create and register the serial event handler (observer pattern)
+  serialEventHandler_ = std::make_unique<SerialEventHandler>(this);
+  serialHandler_->registerObserver(serialEventHandler_.get());
 
-    // Setup callback for unhandled lines (for debugging)
-  serialHandler_->setUnhandledLineCallback(
-    [this](const std::string & line) {
-      RCLCPP_DEBUG(logger_, "Unhandled serial line: %s", line.c_str());
-        });
-
-    // Setup callback for config updates
-  serialHandler_->setConfigCallback(
-    [this](const std::map<std::string, std::string> & config) {
-      RCLCPP_INFO(logger_, "Config received:");
-      for (const auto & [key, value] : config) {
-        RCLCPP_INFO(logger_, "  %s = %s", key.c_str(), value.c_str());
-      }
-        });
-
-    // Setup callback for status updates
-  serialHandler_->setStatusCallback(
-    [this](const std::vector<std::string> & status) {
-      RCLCPP_INFO(logger_, "Status received:");
-      for (const auto & line : status) {
-        RCLCPP_INFO(logger_, "  %s", line.c_str());
-      }
-        });
-
-    // Open the serial port
+  // Open the serial port
   if (!serialHandler_->open()) {
     RCLCPP_ERROR(logger_, "Failed to open serial port: %s", serialPort_.c_str());
     return hardware_interface::CallbackReturn::ERROR;
@@ -204,63 +193,23 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-/*return_type RoamadomeControl::configure(const hardware_interface::HardwareInfo & info)
-{
-    std::cout << "Configuring RoamadomeControl with hardware info: " << info.name << std::endl;
-    return return_type::OK;
-}
-*/
-
-/*return_type RoamadomeControl::start()
-{
-  RCLCPP_INFO(logger_, "Starting Controller...");
-
-  status_ = hardware_interface::status::STARTED;
-
-  return return_type::OK;
-}
-
-
-return_type RoamadomeControl::stop()
-{
-  RCLCPP_INFO(logger_, "Stopping Controller...");
-  status_ = hardware_interface::status::STOPPED;
-
-  return return_type::OK;
-}*/
-
 std::vector<hardware_interface::StateInterface> RoamadomeControl::export_state_interfaces()
 {
-  /*std::vector<StateInterface> state_interfaces;
-  for (size_t i = 0; i < exported_state_interface_names_.size(); ++i)
-  {
-    state_interfaces.emplace_back(
-      get_node()->get_name(), exported_state_interface_names_[i], &state_interfaces_values_[i]);
-  }
-  return state_interfaces;*/
   std::vector<hardware_interface::StateInterface> state_interfaces;
-  state_interfaces.emplace_back(hardware_interface::StateInterface("dome_joint", "position",
-      &position_));
-  state_interfaces.emplace_back(hardware_interface::StateInterface("dome_joint", "velocity",
-      &velocity_));                                                                                        // Placeholder for velocity state interface
+  state_interfaces.emplace_back(
+    hardware_interface::StateInterface(joint_name_, "position", &position_));
+  state_interfaces.emplace_back(
+    hardware_interface::StateInterface(joint_name_, "velocity", &velocity_));
   return state_interfaces;
 }
 
 std::vector<hardware_interface::CommandInterface> RoamadomeControl::export_command_interfaces()
 {
-  /*std::vector<CommandInterface> command_interfaces;
-  for (size_t i = 0; i < exported_command_interface_names_.size(); ++i)
-  {
-    command_interfaces.emplace_back(
-      get_node()->get_name(), exported_command_interface_names_[i], &command_interfaces_values_[i]);
-  }
-  return command_interfaces;*/
-
   std::vector<hardware_interface::CommandInterface> command_interfaces;
-  command_interfaces.emplace_back(hardware_interface::CommandInterface("dome_joint", "position",
-      &cmd_position_));                                                                                            // Placeholder for position command interface
-  command_interfaces.emplace_back(hardware_interface::CommandInterface("dome_joint", "velocity",
-      &cmd_velocity_));                                                                                            // Placeholder for velocity command interface
+  command_interfaces.emplace_back(
+    hardware_interface::CommandInterface(joint_name_, "position", &cmd_position_));
+  command_interfaces.emplace_back(
+    hardware_interface::CommandInterface(joint_name_, "velocity", &cmd_velocity_));
   return command_interfaces;
 }
 
