@@ -168,6 +168,70 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     maxSpeedRadPerSec_ = 3.14;
   }
 
+  // Parse optional auto_mode parameter (default: false)
+  try {
+    auto it = info_.hardware_parameters.find("auto_mode");
+    if (it != info_.hardware_parameters.end()) {
+      std::string value_lower = it->second;
+      std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(),
+        [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+      autoModeEnabled_ = (value_lower == "true" || value_lower == "1" || value_lower == "yes");
+      RCLCPP_INFO(logger_, "auto_mode configured: %s", autoModeEnabled_ ? "enabled" : "disabled");
+    } else {
+      RCLCPP_INFO(logger_, "auto_mode not specified, defaulting to disabled");
+      autoModeEnabled_ = false;
+    }
+  } catch (const std::exception & ex) {
+    RCLCPP_WARN(logger_, "Failed to parse auto_mode parameter, using default (false): %s",
+      ex.what());
+    autoModeEnabled_ = false;
+  }
+
+  // Parse optional home_mode parameter (default: false)
+  try {
+    auto it = info_.hardware_parameters.find("home_mode");
+    if (it != info_.hardware_parameters.end()) {
+      std::string value_lower = it->second;
+      std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(),
+        [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+      homeModeEnabled_ = (value_lower == "true" || value_lower == "1" || value_lower == "yes");
+      RCLCPP_INFO(logger_, "home_mode configured: %s", homeModeEnabled_ ? "enabled" : "disabled");
+    } else {
+      RCLCPP_INFO(logger_, "home_mode not specified, defaulting to disabled");
+      homeModeEnabled_ = false;
+    }
+  } catch (const std::exception & ex) {
+    RCLCPP_WARN(logger_, "Failed to parse home_mode parameter, using default (false): %s",
+      ex.what());
+    homeModeEnabled_ = false;
+  }
+
+  // Parse optional startup_log_level parameter (default: "debug")
+  try {
+    auto it = info_.hardware_parameters.find("startup_log_level");
+    if (it != info_.hardware_parameters.end()) {
+      std::string value_lower = it->second;
+      std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(),
+        [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+      if (value_lower == "debug" || value_lower == "info") {
+        startupLogLevel_ = value_lower;
+        RCLCPP_INFO(logger_, "startup_log_level configured: %s", startupLogLevel_.c_str());
+      } else {
+        RCLCPP_WARN(logger_,
+            "Invalid startup_log_level '%s', must be 'debug' or 'info'. Using default 'debug'",
+          it->second.c_str());
+        startupLogLevel_ = "debug";
+      }
+    } else {
+      RCLCPP_INFO(logger_, "startup_log_level not specified, defaulting to 'debug'");
+      startupLogLevel_ = "debug";
+    }
+  } catch (const std::exception & ex) {
+    RCLCPP_WARN(logger_, "Failed to parse startup_log_level parameter, using default (debug): %s",
+      ex.what());
+    startupLogLevel_ = "debug";
+  }
+
   try {
     auto timeout_it = info_.hardware_parameters.find("startup_default_timeout_ms");
     if (timeout_it != info_.hardware_parameters.end()) {
@@ -313,11 +377,83 @@ void RoamadomeControl::resetStartupContext(StartupContext * context, uint32_t ti
   context->config_received = false;
   context->auto_safety_engaged = true;
   context->failure_reason.clear();
+  context->config_map.clear();
+  context->config_timestamp = std::chrono::steady_clock::time_point();
+  context->initial_config_read = false;
+  context->config_verify_read = false;
+  context->autosafety_valid = false;
   setupGoodMaxSpeed_.reset();
 }
 
 void RoamadomeControl::initializeStartupCommandTable()
 {
+  // Command 0: CONFIG_INITIAL - Read initial configuration
+  StartupCommandInfo config_initial_command;
+  config_initial_command.id = StartupCommandId::CONFIG_INITIAL;
+  config_initial_command.command_template = "#DPCONFIG";
+  config_initial_command.timeout_ms = startupDefaultTimeoutMs_;
+  config_initial_command.is_terminal_command = false;
+  config_initial_command.linear_next = std::nullopt;
+  config_initial_command.command_formatter = std::nullopt;
+  config_initial_command.transition_lambda = [](const StartupContext & ctx,
+    RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
+      (void)ctrl;
+      // Check if AutoSafety is disabled (value should be "0")
+      auto it = ctx.config_map.find("AutoSafety");
+      if (it != ctx.config_map.end() && it->second == "0") {
+        return StartupCommandId::STATUS;
+      }
+      // AutoSafety is enabled or not found, need to run SETUP
+      return StartupCommandId::SETUP;
+    };
+  startupCommandTable_[0] = config_initial_command;
+
+  // Command 1: SETUP - Run setup procedure
+  StartupCommandInfo setup_command;
+  setup_command.id = StartupCommandId::SETUP;
+  setup_command.command_template = "#DPSETUP";
+  setup_command.timeout_ms = startupSetupTimeoutMs_;
+  setup_command.is_terminal_command = false;
+  setup_command.linear_next = StartupCommandId::AUTOSAFETY0;
+  setup_command.command_formatter = std::nullopt;
+  setup_command.transition_lambda = std::nullopt;
+  startupCommandTable_[1] = setup_command;
+
+  // Command 2: AUTOSAFETY0 - Disable auto safety
+  StartupCommandInfo autosafety0_command;
+  autosafety0_command.id = StartupCommandId::AUTOSAFETY0;
+  autosafety0_command.command_template = "#DPAUTOSAFETY0";
+  autosafety0_command.timeout_ms = startupDefaultTimeoutMs_;
+  autosafety0_command.is_terminal_command = false;
+  autosafety0_command.linear_next = StartupCommandId::VERIFY_AUTOSAFETY;
+  autosafety0_command.command_formatter = std::nullopt;
+  autosafety0_command.transition_lambda = std::nullopt;
+  startupCommandTable_[2] = autosafety0_command;
+
+  // Command 3: VERIFY_AUTOSAFETY - Re-read config to verify AutoSafety is now 0
+  StartupCommandInfo verify_autosafety_command;
+  verify_autosafety_command.id = StartupCommandId::VERIFY_AUTOSAFETY;
+  verify_autosafety_command.command_template = "#DPCONFIG";
+  verify_autosafety_command.timeout_ms = startupDefaultTimeoutMs_;
+  verify_autosafety_command.is_terminal_command = false;
+  verify_autosafety_command.linear_next = std::nullopt;
+  verify_autosafety_command.command_formatter = std::nullopt;
+  verify_autosafety_command.transition_lambda = [](const StartupContext & ctx,
+    RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
+      (void)ctrl;
+      // Verify AutoSafety is now disabled
+      auto it = ctx.config_map.find("AutoSafety");
+      if (it != ctx.config_map.end() && it->second == "0") {
+        return StartupCommandId::STATUS;
+      }
+      // AutoSafety is still enabled - this is a failure
+      throw std::runtime_error(
+        "AutoSafety verification failed: expected 0, got " +
+              (it != ctx.config_map.end() ? it->second : "not found"));
+    };
+  startupCommandTable_[3] = verify_autosafety_command;
+
+  // Command 4: STATUS - Verify status shows auto safety disabled
   StartupCommandInfo status_command;
   status_command.id = StartupCommandId::STATUS;
   status_command.command_template = "#DPSTATUS";
@@ -327,31 +463,82 @@ void RoamadomeControl::initializeStartupCommandTable()
   status_command.command_formatter = std::nullopt;
   status_command.transition_lambda = [](const StartupContext & ctx,
     RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
-      (void)ctrl;
-      return ctx.auto_safety_engaged ? StartupCommandId::SETUP : StartupCommandId::CONFIG;
+      // Check config age and warn if stale
+      auto config_age = std::chrono::steady_clock::now() - ctx.config_timestamp;
+      auto config_age_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(config_age).count();
+      if (config_age_ms > ctrl->configStaleWarningMs_) {
+        RCLCPP_WARN(ctrl->logger_,
+          "Configuration data is %lld ms old (threshold: %u ms)",
+          static_cast<long long>(config_age_ms), ctrl->configStaleWarningMs_);
+      }
+
+      // Check if AutoMode matches desired state
+      auto auto_mode_it = ctx.config_map.find("AutoMode");
+      std::string expected_auto_mode = ctrl->autoModeEnabled_ ? "1" : "0";
+      if (auto_mode_it == ctx.config_map.end() ||
+        auto_mode_it->second != expected_auto_mode)
+      {
+        return StartupCommandId::SET_AUTOMODE;
+      }
+
+      // Check if HomeMode matches desired state
+      auto home_mode_it = ctx.config_map.find("HomeMode");
+      std::string expected_home_mode = ctrl->homeModeEnabled_ ? "1" : "0";
+      if (home_mode_it == ctx.config_map.end() ||
+        home_mode_it->second != expected_home_mode)
+      {
+        return StartupCommandId::SET_HOMEMODE;
+      }
+
+      // Both modes match, proceed to REPORT
+      return StartupCommandId::REPORT;
     };
-  startupCommandTable_[0] = status_command;
+  startupCommandTable_[4] = status_command;
 
-  StartupCommandInfo setup_command;
-  setup_command.id = StartupCommandId::SETUP;
-  setup_command.command_template = "#DPSETUP";
-  setup_command.timeout_ms = startupSetupTimeoutMs_;
-  setup_command.is_terminal_command = false;
-  setup_command.linear_next = StartupCommandId::CONFIG;
-  setup_command.command_formatter = std::nullopt;
-  setup_command.transition_lambda = std::nullopt;
-  startupCommandTable_[1] = setup_command;
+  // Command 5: SET_AUTOMODE - Configure AutoMode
+  StartupCommandInfo set_automode_command;
+  set_automode_command.id = StartupCommandId::SET_AUTOMODE;
+  set_automode_command.command_template = "#DPAUTO{}";
+  set_automode_command.timeout_ms = startupDefaultTimeoutMs_;
+  set_automode_command.is_terminal_command = false;
+  set_automode_command.linear_next = std::nullopt;
+  set_automode_command.command_formatter =
+    [](const StartupContext & ctx, RoamadomeControl * ctrl) -> std::string {
+      (void)ctx;
+      return buildCommand("#DPAUTO", ctrl->autoModeEnabled_ ? 1 : 0);
+    };
+  set_automode_command.transition_lambda = [](const StartupContext & ctx,
+    RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
+      // Check if HomeMode matches desired state
+      auto home_mode_it = ctx.config_map.find("HomeMode");
+      std::string expected_home_mode = ctrl->homeModeEnabled_ ? "1" : "0";
+      if (home_mode_it == ctx.config_map.end() ||
+        home_mode_it->second != expected_home_mode)
+      {
+        return StartupCommandId::SET_HOMEMODE;
+      }
+      // HomeMode matches, proceed to REPORT
+      return StartupCommandId::REPORT;
+    };
+  startupCommandTable_[5] = set_automode_command;
 
-  StartupCommandInfo config_command;
-  config_command.id = StartupCommandId::CONFIG;
-  config_command.command_template = "#DPCONFIG";
-  config_command.timeout_ms = startupDefaultTimeoutMs_;
-  config_command.is_terminal_command = false;
-  config_command.linear_next = StartupCommandId::REPORT;
-  config_command.command_formatter = std::nullopt;
-  config_command.transition_lambda = std::nullopt;
-  startupCommandTable_[2] = config_command;
+  // Command 6: SET_HOMEMODE - Configure HomeMode
+  StartupCommandInfo set_homemode_command;
+  set_homemode_command.id = StartupCommandId::SET_HOMEMODE;
+  set_homemode_command.command_template = "#DPHOME{}";
+  set_homemode_command.timeout_ms = startupDefaultTimeoutMs_;
+  set_homemode_command.is_terminal_command = false;
+  set_homemode_command.linear_next = StartupCommandId::REPORT;
+  set_homemode_command.command_formatter =
+    [](const StartupContext & ctx, RoamadomeControl * ctrl) -> std::string {
+      (void)ctx;
+      return buildCommand("#DPHOME", ctrl->homeModeEnabled_ ? 1 : 0);
+    };
+  set_homemode_command.transition_lambda = std::nullopt;
+  startupCommandTable_[6] = set_homemode_command;
 
+  // Command 7: REPORT - Enable periodic reporting (terminal command)
   StartupCommandInfo report_command;
   report_command.id = StartupCommandId::REPORT;
   report_command.command_template = "#DPREPORT{}";
@@ -364,7 +551,7 @@ void RoamadomeControl::initializeStartupCommandTable()
       return buildCommand("#DPREPORT", ctx.report_ms);
     };
   report_command.transition_lambda = std::nullopt;
-  startupCommandTable_[3] = report_command;
+  startupCommandTable_[7] = report_command;
 
   startupCommandTableInitialized_ = true;
 }
@@ -432,7 +619,10 @@ bool RoamadomeControl::sendStartupCommandWithProbe(
     StartupState::WAIT_PROBE,
     context->state_label,
     command_info->timeout_ms);
-  RCLCPP_INFO(logger_, "Startup command sent: %s", context->state_label.c_str());
+
+  std::ostringstream log_msg;
+  log_msg << "Startup command sent: " << context->state_label;
+  logStartupTransition(log_msg.str());
   return true;
 }
 
@@ -440,7 +630,7 @@ std::optional<RoamadomeControl::StartupCommandId> RoamadomeControl::resolveStart
   const StartupContext & context) const
 {
   if (!context.current_command.has_value()) {
-    return StartupCommandId::STATUS;
+    return StartupCommandId::CONFIG_INITIAL;
   }
 
   const StartupCommandInfo * command_info = findStartupCommandInfo(*context.current_command);
@@ -644,6 +834,26 @@ void RoamadomeControl::handleStartupUnhandledLine(const std::string & line)
       RCLCPP_WARN(logger_, "Failed to parse GOOD MAX SPEED from line: %s", line.c_str());
     }
   }
+}
+
+void RoamadomeControl::logStartupTransition(const std::string & message)
+{
+  if ("info" == startupLogLevel_) {
+    RCLCPP_INFO(logger_, "%s", message.c_str());
+  } else {
+    RCLCPP_DEBUG(logger_, "%s", message.c_str());
+  }
+}
+
+bool RoamadomeControl::configValueMatches(
+  const std::string & key,
+  const std::string & expected_value) const
+{
+  auto it = startupContext_.config_map.find(key);
+  if (it == startupContext_.config_map.end()) {
+    return false;
+  }
+  return it->second == expected_value;
 }
 
 hardware_interface::CallbackReturn RoamadomeControl::on_activate(

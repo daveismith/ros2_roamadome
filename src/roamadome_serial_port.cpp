@@ -279,15 +279,6 @@ bool RoamadomeSerialPort::read()
     }
   }
 
-  // Notify any pending data at end of read
-  if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
-    notifyConfigObservers(currentConfig_);
-    currentConfig_.clear();
-  } else if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
-    notifyStatusObservers(currentStatus_);
-    currentStatus_.clear();
-  }
-
   return true;
 }
 

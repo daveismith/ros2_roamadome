@@ -860,23 +860,24 @@ TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesConfigData)
   // We expect the config to be flushed (notified) before the status begins
   writeDataAndWait(
     "PROCESS: \"#DPCONFIG\"\n"
-    "setting1=enabled\n"
-    "setting2=high\n"
+    "a=1\n"
+    "b=2\n"
     "PROCESS: \"#DPSTATUS\"\n"
-    "Device ready\n"
+    "ok\n"
+    "PROCESS: \"#DPINVALID\"\n"
   );
   serialPort_->read();
 
   EXPECT_TRUE(observer.configUpdateCalled())
     << "Config should be notified when state transitions away from CONFIG";
   EXPECT_EQ(observer.lastConfig().size(), 2);
-  EXPECT_EQ(observer.lastConfig().at("setting1"), "enabled");
-  EXPECT_EQ(observer.lastConfig().at("setting2"), "high");
+  EXPECT_EQ(observer.lastConfig().at("a"), "1");
+  EXPECT_EQ(observer.lastConfig().at("b"), "2");
 
   EXPECT_TRUE(observer.statusUpdateCalled())
     << "Status should be notified after config";
   EXPECT_EQ(observer.lastStatus().size(), 1);
-  EXPECT_EQ(observer.lastStatus()[0], "Device ready");
+  EXPECT_EQ(observer.lastStatus()[0], "ok");
 }
 
 TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesStatusData)
@@ -890,23 +891,24 @@ TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesStatusData)
   // We expect the status to be flushed (notified) before the config begins
   writeDataAndWait(
     "PROCESS: \"#DPSTATUS\"\n"
-    "Status line 1\n"
-    "Status line 2\n"
+    "s1\n"
+    "s2\n"
     "PROCESS: \"#DPCONFIG\"\n"
-    "newkey=newvalue\n"
+    "k=v\n"
+    "PROCESS: \"#DPINVALID\"\n"
   );
   serialPort_->read();
 
   EXPECT_TRUE(observer.statusUpdateCalled())
     << "Status should be notified when state transitions away from STATUS";
   EXPECT_EQ(observer.lastStatus().size(), 2);
-  EXPECT_EQ(observer.lastStatus()[0], "Status line 1");
-  EXPECT_EQ(observer.lastStatus()[1], "Status line 2");
+  EXPECT_EQ(observer.lastStatus()[0], "s1");
+  EXPECT_EQ(observer.lastStatus()[1], "s2");
 
   EXPECT_TRUE(observer.configUpdateCalled())
     << "Config should be notified after status";
   EXPECT_EQ(observer.lastConfig().size(), 1);
-  EXPECT_EQ(observer.lastConfig().at("newkey"), "newvalue");
+  EXPECT_EQ(observer.lastConfig().at("k"), "v");
 }
 
 TEST_F(RoamadomeSerialPortTest, TestConsecutiveProcessLines)
@@ -923,6 +925,7 @@ TEST_F(RoamadomeSerialPortTest, TestConsecutiveProcessLines)
     "cfg1=val1\n"
     "PROCESS: \"#DPSTATUS\"\n"
     "status_line\n"
+    "PROCESS: \"#DPINVALID\"\n"
   );
   serialPort_->read();
 
@@ -967,10 +970,18 @@ TEST_F(RoamadomeSerialPortTest, TestPositionWithConfigAndStatusMixed)
   writeDataAndWait("DOME POSITION: 1\n");
   serialPort_->read();
 
-  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nx=1\nDOME POSITION: 2\n");
+  writeDataAndWait(
+    "PROCESS: \"#DPCONFIG\"\n"
+    "x=1\n"
+    "DOME POSITION: 2\n"
+    "PROCESS: \"#DPINVALID\"\n");
   serialPort_->read();
 
-  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nLine A\nDOME POSITION: 3\n");
+  writeDataAndWait(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Line A\n"
+    "DOME POSITION: 3\n"
+    "PROCESS: \"#DPINVALID\"\n");
   serialPort_->read();
 
   // Verify all types of data were processed

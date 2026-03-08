@@ -82,9 +82,13 @@ private:
 
   enum class StartupCommandId
   {
-    STATUS = 0,
+    CONFIG_INITIAL = 0,
     SETUP,
-    CONFIG,
+    AUTOSAFETY0,
+    VERIFY_AUTOSAFETY,
+    STATUS,
+    SET_AUTOMODE,
+    SET_HOMEMODE,
     REPORT
   };
 
@@ -123,6 +127,13 @@ private:
     bool config_received = false;
     bool auto_safety_engaged = true;
     std::string failure_reason;
+
+    // Configuration storage
+    std::map<std::string, std::string> config_map;
+    std::chrono::steady_clock::time_point config_timestamp;
+    bool initial_config_read = false;
+    bool config_verify_read = false;
+    bool autosafety_valid = false;
   };
 
   // Helper methods for startup state machine
@@ -147,6 +158,8 @@ private:
   bool retryCurrentStartupCommand(StartupContext * context);
   bool runStartupStateMachine(uint32_t report_ms);
   void handleStartupUnhandledLine(const std::string & line);
+  void logStartupTransition(const std::string & message);
+  bool configValueMatches(const std::string & key, const std::string & expected_value) const;
 
   // Helper methods for command handling
   uint32_t normalizeAngleDegrees(double radians) const;
@@ -187,9 +200,15 @@ private:
   uint32_t startupSetupTimeoutMs_ = 10000;
   uint32_t startupMaxRetries_ = 1;
   uint32_t startupLoopSleepMs_ = 10;
+  uint32_t configStaleWarningMs_ = 30000;
   std::optional<uint32_t> setupGoodMaxSpeed_;
-  std::array<StartupCommandInfo, 4> startupCommandTable_{};
+  std::array<StartupCommandInfo, 8> startupCommandTable_{};
   bool startupCommandTableInitialized_ = false;
+
+  // Configuration flags
+  bool autoModeEnabled_ = false;
+  bool homeModeEnabled_ = false;
+  std::string startupLogLevel_ = "debug";
 
   StartupContext startupContext_;
 
@@ -238,6 +257,20 @@ public:
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
       controller_->startupContext_.config_received = true;
+      controller_->startupContext_.config_map = config;
+      controller_->startupContext_.config_timestamp = std::chrono::steady_clock::now();
+
+      // Set appropriate flags based on which command triggered this config update
+      if (controller_->startupContext_.current_command.has_value()) {
+        if (*controller_->startupContext_.current_command == StartupCommandId::CONFIG_INITIAL) {
+          controller_->startupContext_.initial_config_read = true;
+        } else if (*controller_->startupContext_.current_command ==
+          StartupCommandId::VERIFY_AUTOSAFETY)
+        {
+          controller_->startupContext_.config_verify_read = true;
+        }
+      }
+
       RCLCPP_INFO(controller_->logger_, "Config received:");
       for (const auto & [key, value] : config) {
         RCLCPP_INFO(controller_->logger_, "  %s = %s", key.c_str(), value.c_str());

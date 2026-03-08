@@ -124,34 +124,138 @@ For detailed hardware setup instructions, see the [DomeControlFirmware README](h
 
 This interface communicates with the hardware via the Roam-A-Dome serial protocol.
 
+### Configuration Parameters
+
+The following parameters can be specified in your URDF/XACRO hardware description:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `serial_port` | string | *required* | Serial port device path (e.g., `/dev/ttyACM0`) |
+| `serial_baud` | uint32 | `115200` | Serial baud rate |
+| `max_speed_rad_per_sec` | double | `3.14` | Maximum dome angular velocity in rad/s (~180°/s) |
+| `auto_mode` | bool | `false` | Enable AutoMode on device during startup |
+| `home_mode` | bool | `false` | Enable HomeMode on device during startup |
+| `startup_log_level` | string | `debug` | Log level for startup transitions (`debug` or `info`) |
+| `startup_default_timeout_ms` | uint32 | `1000` | Default timeout for startup commands (ms) |
+| `startup_setup_timeout_ms` | uint32 | `10000` | Timeout for `#DPSETUP` command (ms) |
+| `startup_report_timeout_ms` | uint32 | `1000` | Timeout for `#DPREPORT` command (ms) |
+| `startup_retries` | uint32 | `1` | Number of retries for timed-out startup commands |
+
+**Example URDF Configuration:**
+
+```xml
+<ros2_control name="roamadome_system" type="system">
+  <hardware>
+    <plugin>ros2_roamadome/RoamadomeControl</plugin>
+    <param name="serial_port">/dev/ttyACM0</param>
+    <param name="serial_baud">115200</param>
+    <param name="max_speed_rad_per_sec">3.14</param>
+    <param name="auto_mode">true</param>
+    <param name="home_mode">false</param>
+    <param name="startup_log_level">info</param>
+  </hardware>
+  <joint name="dome_joint">
+    <command_interface name="position"/>
+    <command_interface name="velocity"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+</ros2_control>
+```
+
+**Note on Logging Levels:**
+- `startup_log_level=debug`: Startup transition logs only appear when running with `--ros-args --log-level debug`
+- `startup_log_level=info`: Startup transition logs always appear at default log level
+
 ### Startup Configure Sequence
 
-During `on_configure()`, startup runs in two phases:
+During `on_configure()`, the hardware interface performs a deterministic startup sequence to ensure the device is properly configured:
 
-1. **Baud sweep pre-step**: iterate `mSupportedBaudRates` and send `#DPSERIALBAUD<target>` at each baud (best-effort, no explicit completion check).
-2. **State machine phase**: send each startup command and then send `#DPINVALID` as a completion probe:
-  - `#DPSTATUS` -> `#DPINVALID`
-  - Optional branch: `#DPSETUP` -> `#DPINVALID` when status includes `Auto Safety Engaged`
-  - `#DPCONFIG` -> `#DPINVALID`
-  - `#DPREPORT<ms>` -> `#DPINVALID`
+```mermaid
+flowchart TD
+    Start([Start Configure]) --> Baud[Baud Rate Sweep]
+    Baud --> Config[CONFIG_INITIAL: Read Config]
+    Config --> CheckAutoSafety{AutoSafety == 0?}
+    
+    CheckAutoSafety -->|Yes| Status[STATUS: Verify Status]
+    CheckAutoSafety -->|No| Setup[SETUP: Run Setup]
+    
+    Setup --> AutoSafety0[AUTOSAFETY0: Disable AutoSafety]
+    AutoSafety0 --> Verify[VERIFY_AUTOSAFETY: Re-read Config]
+    Verify --> CheckVerify{AutoSafety == 0?}
+    CheckVerify -->|Yes| Status
+    CheckVerify -->|No| Failed([FAILED])
+    
+    Status --> CheckConfigAge{Config > 30s old?}
+    CheckConfigAge -->|Yes| WarnStale[Warn: Config Stale]
+    CheckConfigAge -->|No| CheckAuto
+    WarnStale --> CheckAuto{AutoMode Match?}
+    
+    CheckAuto -->|No| SetAuto[SET_AUTOMODE: #DPAUTO]
+    CheckAuto -->|Yes| CheckHome{HomeMode Match?}
+    
+    SetAuto --> CheckHome
+    CheckHome -->|No| SetHome[SET_HOMEMODE: #DPHOME]
+    CheckHome -->|Yes| Report[REPORT: Enable Reporting]
+    
+    SetHome --> Report
+    Report --> Complete([COMPLETE])
+    
+    style Start fill:#e1f5e1
+    style Complete fill:#e1f5e1
+    style Failed fill:#ffe1e1
+    style CheckAutoSafety fill:#fff4e1
+    style CheckVerify fill:#fff4e1
+    style CheckConfigAge fill:#fff4e1
+    style CheckAuto fill:#fff4e1
+    style CheckHome fill:#fff4e1
+```
 
-`#DPSTATUS` branch behavior:
+**Startup Phases:**
 
-- If status contains `Auto Safety Engaged`, startup runs `#DPSETUP`.
-- If status contains `Auto Safety Disengaged`, startup skips `#DPSETUP` and goes to `#DPCONFIG`.
+1. **Baud Rate Sweep**: Iterate through supported baud rates (`2400`, `9600`, `19200`, `38400`, `115200`) and send `#DPSERIALBAUD<target>` at each rate. This is a best-effort step with no explicit completion check.
 
-`#DPSETUP` uses a fixed 10 second timeout.
+2. **CONFIG_INITIAL**: Read the device configuration using `#DPCONFIG`. If `AutoSafety` is already `0`, skip to STATUS. Otherwise, proceed to SETUP.
 
-When setup output contains `GOOD MAX SPEED: <n>`, the value is parsed and stored for future use.
+3. **SETUP → AUTOSAFETY0 → VERIFY_AUTOSAFETY** (conditional): If AutoSafety was enabled:
+   - Run `#DPSETUP` (10-second timeout for mechanical homing)
+   - Send `#DPAUTOSAFETY0` to disable auto safety
+   - Re-read config with `#DPCONFIG` to verify `AutoSafety == 0`
+   - If verification fails, startup fails with error
 
-Probe completion requires reading both lines from serial:
+4. **STATUS**: Run `#DPSTATUS` to verify auto safety is disabled in device status
 
+5. **Configuration Staleness Check**: If the configuration data is older than 30 seconds (configurable via `configStaleWarningMs_`), log a warning. This can catch firmware communication issues.
+
+6. **AutoMode/HomeMode Configuration**: Check if device AutoMode and HomeMode match desired states from URDF parameters:
+   - If `auto_mode=true` but device `AutoMode != 1`, send `#DPAUTO1`
+   - If `auto_mode=false` but device `AutoMode != 0`, send `#DPAUTO0`
+   - If `home_mode=true` but device `HomeMode != 1`, send `#DPHOME1`
+   - If `home_mode=false` but device `HomeMode != 0`, send `#DPHOME0`
+
+7. **REPORT**: Enable periodic position reporting with `#DPREPORT<ms>`, where `<ms>` is calculated from the controller read/write rate
+
+**Command Probe Pattern:**
+
+Each startup command is followed by `#DPINVALID` as a completion probe. The device processes commands sequentially, so probe completion requires reading both:
 - `PROCESS: "#DPINVALID"`
 - `Invalid`
 
-Each wait state performs serial reads in a loop with configurable timeout/retries (`startup_default_timeout_ms`, `startup_setup_timeout_ms`, `startup_report_timeout_ms`, `startup_retries`).
+This ensures the previous command has been fully processed before proceeding.
 
-Transitions are data-driven from a startup command table and resolved after each probe completes, so command-specific branches can be added without introducing new wait states.
+**Timeouts and Retries:**
+
+Each wait state performs serial reads in a loop with configurable timeouts:
+- `startup_default_timeout_ms`: Default timeout for most commands (default: 1000ms)
+- `startup_setup_timeout_ms`: Extended timeout for `#DPSETUP` due to mechanical homing (default: 10000ms)
+- `startup_report_timeout_ms`: Timeout for `#DPREPORT` command (default: 1000ms)
+- `startup_retries`: Number of retry attempts for timed-out commands (default: 1)
+
+**Special Behaviors:**
+
+- When `#DPSETUP` output contains `GOOD MAX SPEED: <n>`, the value is parsed and stored for potential future use
+- Transitions are data-driven from a startup command table with conditional branching via lambda functions
+- Configuration data includes a timestamp to detect stale data (warns if > 30 seconds old)
 
 ### Command Terminators
 
