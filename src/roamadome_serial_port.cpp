@@ -145,14 +145,19 @@ bool RoamadomeSerialPort::configurePort(uint32_t baud_rate)
   return true;
 }
 
-bool RoamadomeSerialPort::sendCommand(const std::string & command)
+bool RoamadomeSerialPort::sendCommand(const std::string & command, bool append_terminator)
 {
   if (!isOpen()) {
     std::cerr << "Cannot send command: port not open" << std::endl;
     return false;
   }
 
-  ssize_t n = ::write(serialFd_, command.c_str(), command.size());
+  std::string wire_command = command;
+  if (append_terminator && (wire_command.empty() || wire_command.back() != '\n')) {
+    wire_command.push_back('\n');
+  }
+
+  ssize_t n = ::write(serialFd_, wire_command.c_str(), wire_command.size());
   if (n < 0) {
     std::cerr << "Error writing to serial port: " << strerror(errno) << std::endl;
     return false;

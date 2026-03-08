@@ -187,6 +187,31 @@ protected:
     pipe_->writeData(data);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+
+  std::string readOutgoingData(size_t max_bytes = 256)
+  {
+    int fd = open(pipe_->path().c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+      return "";
+    }
+
+    std::string output;
+    output.resize(max_bytes, '\0');
+
+    for (int attempt = 0; attempt < 25; ++attempt) {
+      ssize_t n = read(fd, output.data(), max_bytes);
+      if (n > 0) {
+        output.resize(static_cast<size_t>(n));
+        close(fd);
+        return output;
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    close(fd);
+    return "";
+  }
 };
 
 // ============================================================================
@@ -955,6 +980,30 @@ TEST_F(RoamadomeSerialPortTest, TestPositionWithConfigAndStatusMixed)
     << "Should process config";
   EXPECT_GE(statusCount, 1)
     << "Should process status";
+}
+
+TEST_F(RoamadomeSerialPortTest, SendCommand_AppendsNewlineByDefault)
+{
+  openPort();
+
+  ASSERT_TRUE(serialPort_->sendCommand("#DPSTATUS"));
+  EXPECT_EQ(readOutgoingData(), "#DPSTATUS\n");
+}
+
+TEST_F(RoamadomeSerialPortTest, SendCommand_OptOutLeavesCommandUnchanged)
+{
+  openPort();
+
+  ASSERT_TRUE(serialPort_->sendCommand("#DPSTATUS", false));
+  EXPECT_EQ(readOutgoingData(), "#DPSTATUS");
+}
+
+TEST_F(RoamadomeSerialPortTest, SendCommand_DoesNotDoubleTerminate)
+{
+  openPort();
+
+  ASSERT_TRUE(serialPort_->sendCommand("#DPSTATUS\n"));
+  EXPECT_EQ(readOutgoingData(), "#DPSTATUS\n");
 }
 
 }  // namespace ros2_roamadome

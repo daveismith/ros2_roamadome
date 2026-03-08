@@ -8,7 +8,14 @@
 #include "hardware_interface/actuator_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
+#include <chrono>
+#include <array>
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 
 using hardware_interface::return_type;
 
@@ -63,6 +70,78 @@ private:
     VELOCITY
   };
 
+  // Startup state machine for on_configure()
+  enum class StartupState
+  {
+    SEND_COMMAND,
+    WAIT_PROBE,
+    COMPLETE,
+    FAILED
+  };
+
+  enum class StartupCommandId
+  {
+    STATUS = 0,
+    SETUP,
+    CONFIG,
+    REPORT
+  };
+
+  enum class StartupTransitionRule
+  {
+    LINEAR_NEXT,
+    STATUS_AUTO_SAFETY_BRANCH,
+    COMPLETE
+  };
+
+  struct StartupCommandInfo
+  {
+    StartupCommandId id;
+    std::string command_template;
+    uint32_t timeout_ms;
+    StartupTransitionRule transition_rule;
+    std::optional<StartupCommandId> linear_next;
+  };
+
+  struct StartupContext
+  {
+    StartupState state = StartupState::SEND_COMMAND;
+    std::optional<StartupCommandId> current_command;
+    std::string formatted_command;
+    std::string state_label;
+    std::chrono::steady_clock::time_point state_start;
+    uint32_t timeout_ms = 1000;
+    uint32_t retries_used = 0;
+    bool probe_process_seen = false;
+    bool probe_invalid_seen = false;
+    bool status_received = false;
+    bool config_received = false;
+    bool auto_safety_engaged = true;
+    std::string failure_reason;
+  };
+
+  // Helper methods for startup state machine
+  void resetStartupContext(StartupContext * context, uint32_t timeout_ms);
+  void initializeStartupCommandTable();
+  const StartupCommandInfo * findStartupCommandInfo(StartupCommandId command_id) const;
+  std::string formatStartupCommand(StartupCommandId command_id, uint32_t report_ms) const;
+  bool sendStartupCommandWithProbe(
+    StartupContext * context,
+    StartupCommandId command_id,
+    uint32_t report_ms);
+  std::optional<StartupCommandId> resolveStartupNextCommand(
+    const StartupContext & context) const;
+  bool startupProbeComplete(const StartupContext & context) const;
+  bool startupStateTimedOut(const StartupContext & context) const;
+  void transitionStartupState(
+    StartupContext * context,
+    StartupState next_state,
+    const std::string & label,
+    uint32_t timeout_ms);
+  bool retryCurrentStartupCommand(StartupContext * context);
+  bool runStartupStateMachine(uint32_t report_ms);
+  void handleStartupUnhandledLine(const std::string & line);
+
   // Helper methods for command handling
   uint32_t normalizeAngleDegrees(double radians) const;
   double radiansToDegrees(double radians) const;
@@ -96,6 +175,17 @@ private:
   std::unique_ptr<RoamadomeSerialPort> serialHandler_;
   std::string serialPort_;
   uint32_t serialBaud_;
+
+  uint32_t startupDefaultTimeoutMs_ = 1000;
+  uint32_t startupReportTimeoutMs_ = 1000;
+  uint32_t startupSetupTimeoutMs_ = 10000;
+  uint32_t startupMaxRetries_ = 1;
+  uint32_t startupLoopSleepMs_ = 10;
+  std::optional<uint32_t> setupGoodMaxSpeed_;
+  std::array<StartupCommandInfo, 4> startupCommandTable_{};
+  bool startupCommandTableInitialized_ = false;
+
+  StartupContext startupContext_;
 
   const uint32_t mSupportedBaudRates[5] = {
     2400,
@@ -135,11 +225,13 @@ public:
 
     void onUnhandledLine(const std::string & line) override
     {
+      controller_->handleStartupUnhandledLine(line);
       RCLCPP_DEBUG(controller_->logger_, "Unhandled serial line: %s", line.c_str());
     }
 
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
+      controller_->startupContext_.config_received = true;
       RCLCPP_INFO(controller_->logger_, "Config received:");
       for (const auto & [key, value] : config) {
         RCLCPP_INFO(controller_->logger_, "  %s = %s", key.c_str(), value.c_str());
@@ -148,8 +240,17 @@ public:
 
     void onStatusUpdate(const std::vector<std::string> & status) override
     {
+      controller_->startupContext_.status_received = true;
       RCLCPP_INFO(controller_->logger_, "Status received:");
       for (const auto & line : status) {
+        std::string lowered_line = line;
+        std::transform(lowered_line.begin(), lowered_line.end(), lowered_line.begin(),
+          [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+        if (lowered_line.find("auto safety engaged") != std::string::npos) {
+          controller_->startupContext_.auto_safety_engaged = true;
+        } else if (lowered_line.find("auto safety disengaged") != std::string::npos) {
+          controller_->startupContext_.auto_safety_engaged = false;
+        }
         RCLCPP_INFO(controller_->logger_, "  %s", line.c_str());
       }
     }

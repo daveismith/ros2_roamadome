@@ -108,9 +108,10 @@ public:
   /**
    * @brief Sends a command to the device
    * @param command Command string to send
+   * @param append_terminator If true, append '\n' when missing (default: true)
    * @return true if successfully written, false on error
    */
-  bool sendCommand(const std::string & command);
+  bool sendCommand(const std::string & command, bool append_terminator = true);
 
   /**
    * @brief Main read loop - reads from serial and processes lines
