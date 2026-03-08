@@ -448,6 +448,11 @@ void RoamadomeControl::initializeStartupCommandTable()
       // Acquire lock for reading config snapshot
       std::lock_guard<std::mutex> lock(ctrl->startupContext_mutex_);
 
+      if (ctx.auto_safety_engaged) {
+        RCLCPP_ERROR(ctrl->logger_, "AutoSafety is still engaged according to status response");
+        throw std::runtime_error("AutoSafety is still engaged according to status response");
+      }
+
       // Check config age and warn if stale
       auto config_age = std::chrono::steady_clock::now() - ctx.config_timestamp;
       auto config_age_ms =

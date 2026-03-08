@@ -141,6 +141,7 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `startup_report_timeout_ms` | uint32 | `1000` | Timeout for `#DPREPORT` command (ms) |
 | `startup_retries` | uint32 | `1` | Number of retries for timed-out startup commands |
 | `startup_config_stale_warning_ms` | uint32 | `30000` | Warning threshold for stale configuration data (ms) |
+| `serial_section_flush_timeout_ms` | uint32 | `500` | Idle timeout before flushing partial CONFIG/STATUS sections during serial parsing (ms) |
 
 **Example URDF Configuration:**
 
@@ -254,7 +255,7 @@ Each wait state performs serial reads in a loop with configurable timeouts:
 
 **Special Behaviors:**
 
-- When `#DPSETUP` output contains `GOOD MAX SPEED: <n>`, the value is parsed and stored for potential future use
+- `#DPSETUP` output may include `GOOD MAX SPEED: <n>` from the firmware; this value is currently treated as informational and is not parsed or stored by the ROS2 interface
 - Transitions are data-driven from a startup command table with conditional branching via lambda functions
 - Configuration data includes a timestamp to detect stale data (warns if older than `startup_config_stale_warning_ms`, default 30 seconds)
 

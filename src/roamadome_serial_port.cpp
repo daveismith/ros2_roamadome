@@ -35,10 +35,29 @@ bool RoamadomeSerialPort::open()
     return false;
   }
 
+  // Open with O_NONBLOCK to avoid blocking on FIFOs/devices that aren't ready
   int fd = ::open(portName_.c_str(), O_RDWR | O_NOCTTY | O_SYNC | O_NONBLOCK);
   if (fd < 0) {
     std::cerr << "Error opening " << portName_ << ": " << strerror(errno) << std::endl;
     return false;
+  }
+
+  // For real TTY devices (not FIFOs/pipes), clear O_NONBLOCK after opening to avoid
+  // EAGAIN/EWOULDBLOCK on write() calls during transient backpressure.
+  // VMIN=0/VTIME=0 (set in configurePort) will still provide non-blocking reads.
+  // For non-TTY devices (FIFOs), keep O_NONBLOCK since they don't support termios.
+  if (isatty(fd)) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+      std::cerr << "Error getting fd flags: " << strerror(errno) << std::endl;
+      ::close(fd);
+      return false;
+    }
+    if (fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == -1) {
+      std::cerr << "Error clearing O_NONBLOCK: " << strerror(errno) << std::endl;
+      ::close(fd);
+      return false;
+    }
   }
 
   serialFd_ = fd;
