@@ -65,8 +65,8 @@ bool parseOptionalBoolParameter(
 /// @param parameters Map of parameter names to values
 /// @param logger ROS logger for error messages
 /// @param parameter_name Name of the parameter to parse
-/// @param default_value Default value to use if parameter is not found
-/// @param allowed_values Vector of allowed values (case-insensitive)
+/// @param default_value Default value to use if parameter is not found (must be lowercase)
+/// @param allowed_values Vector of allowed values (must be lowercase; comparison is against a lowercased parameter value)
 /// @param value Output pointer to store the parsed value
 /// @return true if parameter is valid or missing (uses default), false if not in allowed_values
 ros2_roamadome_PUBLIC
