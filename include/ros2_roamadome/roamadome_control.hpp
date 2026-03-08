@@ -267,6 +267,6 @@ private:
 
 };
 
-}  // namespace roamadome_control
+}  // namespace ros2_roamadome
 
 #endif  // roamadome_control__ROAMADOME_CONTROL_HPP_

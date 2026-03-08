@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <map>
+#include <cstdint>
 
 namespace ros2_roamadome
 {

@@ -93,7 +93,7 @@ ament_export_include_directories(
   "include/${PROJECT_NAME}"
 )
 ament_export_libraries(
-  roamadome_control
+  ros2_roamadome
 )
 ament_export_targets(
   export_${PROJECT_NAME}

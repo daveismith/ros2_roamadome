@@ -7,14 +7,33 @@
 #include <format>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <time.h>
 
 namespace ros2_roamadome
 {
 
+namespace
+{
+
+bool matchesInterfaceName(const std::string & interface_name, std::string_view expected_name)
+{
+  const size_t separator_pos = interface_name.rfind('/');
+  const std::string_view candidate =
+    (std::string::npos == separator_pos) ?
+    std::string_view(interface_name) :
+    std::string_view(interface_name).substr(separator_pos + 1);
+  return candidate == expected_name;
+}
+
+}  // namespace
+
 RoamadomeControl::RoamadomeControl()
-: logger_(rclcpp::get_logger("RoamadomeControl")), position_(0.0)
+: logger_(rclcpp::get_logger("RoamadomeControl")), position_(0.0), velocity_(0.0),
+  cmd_position_(0.0), cmd_velocity_(0.0),
+  currentMode_(CommandMode::IDLE), previousMode_(CommandMode::IDLE),
+  lastSentPosition_(-1.0), lastSentVelocity_(0.0)
 {
   std::cout << "RoamadomeControl initialized." << std::endl;
 }
@@ -154,7 +173,13 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   const rclcpp_lifecycle::State & previous_state)
 {
   const struct timespec ts = {.tv_sec = 0, .tv_nsec = 500000000};
-  const uint32_t report_ms = (1000 / info_.rw_rate) - 5;
+  if (0 == info_.rw_rate) {
+    RCLCPP_ERROR(logger_, "Invalid rw_rate: 0");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  const uint32_t cycle_ms = std::max<uint32_t>(1U, 1000U / info_.rw_rate);
+  const uint32_t report_ms = (cycle_ms > 5U) ? (cycle_ms - 5U) : 1U;
 
   RCLCPP_INFO(logger_, "Configuring RoamadomeControl from state: %s",
       previous_state.label().c_str());
@@ -681,9 +706,9 @@ hardware_interface::return_type RoamadomeControl::prepare_command_mode_switch(
   bool velocity_starting = false;
 
   for (const auto & interface : start_interfaces) {
-    if (interface.find("position") != std::string::npos) {
+    if (matchesInterfaceName(interface, "position")) {
       position_starting = true;
-    } else if (interface.find("velocity") != std::string::npos) {
+    } else if (matchesInterfaceName(interface, "velocity")) {
       velocity_starting = true;
     }
   }
@@ -710,10 +735,10 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
   CommandMode new_mode = CommandMode::IDLE;
 
   for (const auto & interface : start_interfaces) {
-    if (interface.find("position") != std::string::npos) {
+    if (matchesInterfaceName(interface, "position")) {
       new_mode = CommandMode::POSITION;
       break;
-    } else if (interface.find("velocity") != std::string::npos) {
+    } else if (matchesInterfaceName(interface, "velocity")) {
       new_mode = CommandMode::VELOCITY;
       break;
     }
@@ -808,7 +833,7 @@ bool RoamadomeControl::sendStopCommand()
   return serialHandler_->sendCommand(":DPR0");
 }
 
-}  // namespace roamadome_control
+}  // namespace ros2_roamadome
 
 #include <pluginlib/class_list_macros.hpp>
 

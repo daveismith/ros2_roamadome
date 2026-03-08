@@ -303,43 +303,6 @@ TEST_F(RoamadomeControlTest, ExportCommandInterfaces_DynamicJointName)
 
 /**
  * ============================================================================
- * SERIAL EVENT HANDLER (OBSERVER) TESTS
- * ============================================================================
- * These tests verify that the SerialEventHandler inner class correctly
- * implements the observer pattern and handles serial events properly
- */
-
-TEST_F(RoamadomeControlTest, SerialEventHandler_PositionUpdate)
-{
-  // Test: SerialEventHandler should update position_ on position events
-  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
-  hardware_interface::HardwareComponentInterfaceParams params;
-  params.hardware_info = info;
-
-  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
-
-  // The handler is created during on_configure, so we verify joint_name_ is set
-  // which is required before export functions are called
-  auto state_interfaces = controller_->export_state_interfaces();
-  EXPECT_EQ(state_interfaces.size(), 2);  // position and velocity
-}
-
-TEST_F(RoamadomeControlTest, SerialEventHandler_HandlesDegreesDegrees_RadiansConversion)
-{
-  // Test: Position updates convert degrees to radians correctly
-  // 90 degrees should be approximately pi/2 radians
-  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
-  hardware_interface::HardwareComponentInterfaceParams params;
-  params.hardware_info = info;
-
-  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
-
-  // The conversion happens in SerialEventHandler::onPositionUpdate
-  // which we'll test indirectly through the full stack once on_configure is called
-}
-
-/**
- * ============================================================================
  * PARAMETER PARSING TESTS
  * ============================================================================
  * These tests verify that on_init() correctly parses hardware parameters
@@ -373,9 +336,9 @@ TEST_F(RoamadomeControlTest, ParameterParsing_MissingSerialPort_Fails)
   EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
 }
 
-TEST_F(RoamadomeControlTest, ParameterParsing_InvalidBaud_Defaults)
+TEST_F(RoamadomeControlTest, ParameterParsing_InvalidBaudFormat_Fails)
 {
-  // Test: on_init() should use default baud if invalid value provided
+  // Test: on_init() should fail if serial_baud has invalid format
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
   info.hardware_parameters["serial_baud"] = "invalid_baud";
 
@@ -430,6 +393,42 @@ TEST_F(RoamadomeControlTest, ExportsCorrectInterfaceTypes)
   // Command interfaces
   EXPECT_EQ(command_interfaces[0].get_interface_name(), "position");
   EXPECT_EQ(command_interfaces[1].get_interface_name(), "velocity");
+}
+
+TEST_F(RoamadomeControlTest, PrepareCommandModeSwitch_IgnoresSubstringInterfaceNames)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  // "position_limit" should not be treated as the position interface.
+  const std::vector<std::string> start_interfaces = {
+    "dome_joint/position_limit",
+    "dome_joint/velocity"
+  };
+
+  EXPECT_EQ(
+    controller_->prepare_command_mode_switch(start_interfaces, {}),
+    hardware_interface::return_type::OK);
+}
+
+TEST_F(RoamadomeControlTest, ConfigureFailsWhenReadWriteRateIsZero)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.rw_rate = 0;
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  EXPECT_EQ(
+    controller_->on_configure(previous_state),
+    hardware_interface::CallbackReturn::ERROR);
 }
 
 TEST_F(RoamadomeControlTest, ConfigureStateMachine_SkipsSetupWhenAutoSafetyNotEngaged)
@@ -747,9 +746,3 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_UsesConfigurableSetupTimeout)
 }
 
 }  // namespace ros2_roamadome
-
-int main(int argc, char ** argv)
-{
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

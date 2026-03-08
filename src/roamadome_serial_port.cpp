@@ -7,6 +7,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <sstream>
 #include <iostream>
 #include <sys/ioctl.h>
@@ -157,10 +158,21 @@ bool RoamadomeSerialPort::sendCommand(const std::string & command, bool append_t
     wire_command.push_back('\n');
   }
 
-  ssize_t n = ::write(serialFd_, wire_command.c_str(), wire_command.size());
-  if (n < 0) {
-    std::cerr << "Error writing to serial port: " << strerror(errno) << std::endl;
-    return false;
+  size_t total_written = 0;
+  while (total_written < wire_command.size()) {
+    const ssize_t n = ::write(
+      serialFd_,
+      wire_command.c_str() + total_written,
+      wire_command.size() - total_written);
+    if (n < 0) {
+      std::cerr << "Error writing to serial port: " << strerror(errno) << std::endl;
+      return false;
+    }
+    if (0 == n) {
+      std::cerr << "Error writing to serial port: short write (0 bytes written)" << std::endl;
+      return false;
+    }
+    total_written += static_cast<size_t>(n);
   }
 
   return true;
@@ -311,7 +323,7 @@ std::optional<std::pair<uint32_t, double>> RoamadomeSerialPort::parsePositionLin
     // Find the end of the number (space, comma, newline, etc.)
     size_t endIdx = 0;
     for (size_t i = 0; i < posStr.length(); ++i) {
-      if (!isdigit(posStr[i])) {
+      if (0 == std::isdigit(static_cast<unsigned char>(posStr[i]))) {
         endIdx = i;
         break;
       }
