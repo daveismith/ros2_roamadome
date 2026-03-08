@@ -267,6 +267,11 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
       startupMaxRetries_ = static_cast<uint32_t>(std::stoul(retries_it->second));
     }
 
+    auto stale_warning_it = info_.hardware_parameters.find("startup_config_stale_warning_ms");
+    if (stale_warning_it != info_.hardware_parameters.end()) {
+      configStaleWarningMs_ = static_cast<uint32_t>(std::stoul(stale_warning_it->second));
+    }
+
   } catch (const std::exception & ex) {
     RCLCPP_ERROR(logger_, "Invalid startup timing parameters: %s", ex.what());
     return hardware_interface::CallbackReturn::ERROR;
@@ -387,6 +392,13 @@ void RoamadomeControl::resetStartupContext(StartupContext * context, uint32_t ti
 
 void RoamadomeControl::initializeStartupCommandTable()
 {
+  // Compile-time safety check: ensure array size matches command enum cardinality
+  static_assert(
+    static_cast<int>(StartupCommandId::REPORT) + 1 == 8,
+    "startupCommandTable_ size (8) must match highest StartupCommandId + 1; "
+    "update array size if adding new StartupCommandId entries"
+  );
+
   // Command 0: CONFIG_INITIAL - Read initial configuration
   StartupCommandInfo config_initial_command;
   config_initial_command.id = StartupCommandId::CONFIG_INITIAL;
@@ -397,7 +409,7 @@ void RoamadomeControl::initializeStartupCommandTable()
   config_initial_command.command_formatter = std::nullopt;
   config_initial_command.transition_lambda = [](const StartupContext & ctx,
     RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
-      (void)ctrl;
+      std::lock_guard<std::mutex> lock(ctrl->startupContext_mutex_);
       // Check if AutoSafety is disabled (value should be "0")
       auto it = ctx.config_map.find("AutoSafety");
       if (it != ctx.config_map.end() && it->second == "0") {
@@ -440,7 +452,7 @@ void RoamadomeControl::initializeStartupCommandTable()
   verify_autosafety_command.command_formatter = std::nullopt;
   verify_autosafety_command.transition_lambda = [](const StartupContext & ctx,
     RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
-      (void)ctrl;
+      std::lock_guard<std::mutex> lock(ctrl->startupContext_mutex_);
       // Verify AutoSafety is now disabled
       auto it = ctx.config_map.find("AutoSafety");
       if (it != ctx.config_map.end() && it->second == "0") {
@@ -463,6 +475,9 @@ void RoamadomeControl::initializeStartupCommandTable()
   status_command.command_formatter = std::nullopt;
   status_command.transition_lambda = [](const StartupContext & ctx,
     RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
+      // Acquire lock for reading config snapshot
+      std::lock_guard<std::mutex> lock(ctrl->startupContext_mutex_);
+
       // Check config age and warn if stale
       auto config_age = std::chrono::steady_clock::now() - ctx.config_timestamp;
       auto config_age_ms =
@@ -510,6 +525,7 @@ void RoamadomeControl::initializeStartupCommandTable()
     };
   set_automode_command.transition_lambda = [](const StartupContext & ctx,
     RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
+      std::lock_guard<std::mutex> lock(ctrl->startupContext_mutex_);
       // Check if HomeMode matches desired state
       auto home_mode_it = ctx.config_map.find("HomeMode");
       std::string expected_home_mode = ctrl->homeModeEnabled_ ? "1" : "0";
@@ -843,17 +859,6 @@ void RoamadomeControl::logStartupTransition(const std::string & message)
   } else {
     RCLCPP_DEBUG(logger_, "%s", message.c_str());
   }
-}
-
-bool RoamadomeControl::configValueMatches(
-  const std::string & key,
-  const std::string & expected_value) const
-{
-  auto it = startupContext_.config_map.find(key);
-  if (it == startupContext_.config_map.end()) {
-    return false;
-  }
-  return it->second == expected_value;
 }
 
 hardware_interface::CallbackReturn RoamadomeControl::on_activate(

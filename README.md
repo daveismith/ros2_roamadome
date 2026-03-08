@@ -140,6 +140,7 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `startup_setup_timeout_ms` | uint32 | `10000` | Timeout for `#DPSETUP` command (ms) |
 | `startup_report_timeout_ms` | uint32 | `1000` | Timeout for `#DPREPORT` command (ms) |
 | `startup_retries` | uint32 | `1` | Number of retries for timed-out startup commands |
+| `startup_config_stale_warning_ms` | uint32 | `30000` | Warning threshold for stale configuration data (ms) |
 
 **Example URDF Configuration:**
 
@@ -225,7 +226,7 @@ flowchart TD
 
 4. **STATUS**: Run `#DPSTATUS` to verify auto safety is disabled in device status
 
-5. **Configuration Staleness Check**: If the configuration data is older than 30 seconds (configurable via `configStaleWarningMs_`), log a warning. This can catch firmware communication issues.
+5. **Configuration Staleness Check**: If the configuration data is older than the threshold (default 30 seconds, configurable via `startup_config_stale_warning_ms`), log a warning. This can catch firmware communication issues.
 
 6. **AutoMode/HomeMode Configuration**: Check if device AutoMode and HomeMode match desired states from URDF parameters:
    - If `auto_mode=true` but device `AutoMode != 1`, send `#DPAUTO1`
@@ -255,7 +256,7 @@ Each wait state performs serial reads in a loop with configurable timeouts:
 
 - When `#DPSETUP` output contains `GOOD MAX SPEED: <n>`, the value is parsed and stored for potential future use
 - Transitions are data-driven from a startup command table with conditional branching via lambda functions
-- Configuration data includes a timestamp to detect stale data (warns if > 30 seconds old)
+- Configuration data includes a timestamp to detect stale data (warns if older than `startup_config_stale_warning_ms`, default 30 seconds)
 
 ### Command Terminators
 

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -113,6 +114,12 @@ private:
 
   struct StartupContext
   {
+    /// @note: startupContext_ is accessed from both the serial reader callback
+    /// (which runs during serialHandler_->read() via SerialEventHandler::onConfigUpdate)
+    /// and from the startup state machine (which runs synchronously during on_configure).
+    /// Access to config_map and config_timestamp fields are protected by
+    /// startupContext_mutex_ to ensure thread-safe delivery of configuration snapshots.
+
     StartupState state = StartupState::SEND_COMMAND;
     std::optional<StartupCommandId> current_command;
     std::string formatted_command;
@@ -128,7 +135,7 @@ private:
     bool auto_safety_engaged = true;
     std::string failure_reason;
 
-    // Configuration storage
+    // Configuration storage (protected by startupContext_mutex_)
     std::map<std::string, std::string> config_map;
     std::chrono::steady_clock::time_point config_timestamp;
     bool initial_config_read = false;
@@ -159,7 +166,6 @@ private:
   bool runStartupStateMachine(uint32_t report_ms);
   void handleStartupUnhandledLine(const std::string & line);
   void logStartupTransition(const std::string & message);
-  bool configValueMatches(const std::string & key, const std::string & expected_value) const;
 
   // Helper methods for command handling
   uint32_t normalizeAngleDegrees(double radians) const;
@@ -211,6 +217,7 @@ private:
   std::string startupLogLevel_ = "debug";
 
   StartupContext startupContext_;
+  mutable std::mutex startupContext_mutex_;  // Protects startupContext_.config_map and config_timestamp
 
   const uint32_t mSupportedBaudRates[5] = {
     2400,
@@ -256,6 +263,7 @@ public:
 
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
+      std::lock_guard<std::mutex> lock(controller_->startupContext_mutex_);
       controller_->startupContext_.config_received = true;
       controller_->startupContext_.config_map = config;
       controller_->startupContext_.config_timestamp = std::chrono::steady_clock::now();

@@ -993,6 +993,90 @@ TEST_F(RoamadomeSerialPortTest, TestPositionWithConfigAndStatusMixed)
     << "Should process status";
 }
 
+TEST_F(RoamadomeSerialPortTest, TestRealisticBatchedConfigStatusAcrossChunkedReads)
+{
+  // Validates realistic startup configuration data split across multiple serial reads.
+  // This simulates firmware sending config/status parameters in multiple chunks,
+  // with batch delivery to observers.
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Chunk 1: Start CONFIG state and first parameter
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nAutoSafety=1\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.configUpdateCalled())
+    << "Config should not be notified yet (stream still in CONFIG state)";
+
+  // Chunk 2: More config parameters
+  writeDataAndWait("AutoMode=0\nHomeMode=1\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.configUpdateCalled())
+    << "Config should not be notified yet (still in CONFIG state)";
+
+  // Chunk 3: Transition to STATUS state triggers config flush and batch delivery
+  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nAuto Safety Engaged\nSystem Ready\n");
+  serialPort_->read();
+  EXPECT_TRUE(observer.configUpdateCalled())
+    << "Config should be batched and notified on state transition";
+
+  // Verify complete config batch was delivered
+  const auto & config = observer.lastConfig();
+  EXPECT_EQ(config.size(), 3);
+  EXPECT_EQ(config.at("AutoSafety"), "1");
+  EXPECT_EQ(config.at("AutoMode"), "0");
+  EXPECT_EQ(config.at("HomeMode"), "1");
+
+  observer.reset();
+
+  // Chunk 4: Transition away from STATUS (back to CONFIG) to flush status data
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nAutoSafety=0\n");
+  serialPort_->read();
+
+  // Now status should be notified
+  EXPECT_TRUE(observer.statusUpdateCalled())
+    << "Status should be notified when transitioning away from STATUS state";
+  const auto & status = observer.lastStatus();
+  EXPECT_EQ(status.size(), 2);
+  EXPECT_EQ(status[0], "Auto Safety Engaged");
+  EXPECT_EQ(status[1], "System Ready");
+}
+
+TEST_F(RoamadomeSerialPortTest, TestRealisticStatusWithProbeCompletion)
+{
+  // Validates realistic startup probe completion sequence with actual parameter names.
+  // Demonstrates that status data is buffered until a state transition flushes it.
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Chunk 1: Run #DPSTATUS command, get response start
+  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.statusUpdateCalled())
+    << "Status not delivered yet (still in STATUS state)";
+
+  // Chunk 2: More status lines
+  writeDataAndWait("System Ready\nGood Max Speed: 400\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.statusUpdateCalled())
+    << "Status not delivered yet (still in STATUS state)";
+
+  // Chunk 3: Send probe and transition back to CONFIG to trigger status flush
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nAutoSafety=1\n");
+  serialPort_->read();
+
+  // Status should now be delivered (flushed on transition away)
+  EXPECT_TRUE(observer.statusUpdateCalled())
+    << "Status should be delivered after transitioning away from STATUS state";
+  const auto & status = observer.lastStatus();
+  EXPECT_GE(status.size(), 2);
+  EXPECT_EQ(status[0], "Auto Safety Disengaged");
+  EXPECT_EQ(status[1], "System Ready");
+}
+
 TEST_F(RoamadomeSerialPortTest, SendCommand_AppendsNewlineByDefault)
 {
   openPort();
