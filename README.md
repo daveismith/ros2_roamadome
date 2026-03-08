@@ -145,7 +145,7 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 **Example URDF Configuration:**
 
 ```xml
-<ros2_control name="roamadome_system" type="system">
+<ros2_control name="roamadome_actuator" type="actuator">
   <hardware>
     <plugin>ros2_roamadome/RoamadomeControl</plugin>
     <param name="serial_port">/dev/ttyACM0</param>

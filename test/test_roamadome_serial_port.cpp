@@ -44,12 +44,14 @@ public:
   {
     configUpdateCalled_ = true;
     lastConfig_ = config;
+    configUpdateCount_++;
   }
 
   void onStatusUpdate(const std::vector<std::string> & status) override
   {
     statusUpdateCalled_ = true;
     lastStatus_ = status;
+    statusUpdateCount_++;
   }
 
   bool positionUpdateCalled() const {return positionUpdateCalled_;}
@@ -67,6 +69,8 @@ public:
 
   int positionUpdateCount() const {return positionUpdateCount_;}
   int unhandledLineCount() const {return unhandledLineCount_;}
+  int configUpdateCount() const {return configUpdateCount_;}
+  int statusUpdateCount() const {return statusUpdateCount_;}
 
   void reset()
   {
@@ -83,6 +87,8 @@ public:
     lastStatus_.clear();
     positionUpdateCount_ = 0;
     unhandledLineCount_ = 0;
+    configUpdateCount_ = 0;
+    statusUpdateCount_ = 0;
   }
 
 private:
@@ -101,6 +107,8 @@ private:
 
   int positionUpdateCount_ = 0;
   int unhandledLineCount_ = 0;
+  int configUpdateCount_ = 0;
+  int statusUpdateCount_ = 0;
 };
 
 // Helper class for managing temporary named pipes
@@ -1075,6 +1083,64 @@ TEST_F(RoamadomeSerialPortTest, TestRealisticStatusWithProbeCompletion)
   EXPECT_GE(status.size(), 2);
   EXPECT_EQ(status[0], "Auto Safety Disengaged");
   EXPECT_EQ(status[1], "System Ready");
+}
+
+TEST_F(RoamadomeSerialPortTest, SectionFlushOccursOnTimeoutInLaterReadCall)
+{
+  openPort();
+  serialPort_->setSectionFlushTimeoutMs(20);
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  writeDataAndWait(
+    "PROCESS: \"#DPCONFIG\"\n"
+    "AutoSafety=1\n"
+    "AutoMode=0\n");
+  serialPort_->read();
+
+  EXPECT_FALSE(observer.configUpdateCalled())
+    << "Config should not flush before timeout without a section boundary";
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  serialPort_->read();
+
+  ASSERT_TRUE(observer.configUpdateCalled())
+    << "Config should flush on a later read() call after timeout";
+  EXPECT_EQ(observer.configUpdateCount(), 1);
+  EXPECT_EQ(observer.lastConfig().size(), 2);
+
+  const auto autosafety_it = observer.lastConfig().find("AutoSafety");
+  ASSERT_NE(autosafety_it, observer.lastConfig().end());
+  EXPECT_EQ(autosafety_it->second, "1");
+
+  const auto automode_it = observer.lastConfig().find("AutoMode");
+  ASSERT_NE(automode_it, observer.lastConfig().end());
+  EXPECT_EQ(automode_it->second, "0");
+}
+
+TEST_F(RoamadomeSerialPortTest, SectionFlushIsOneShotAfterTimeout)
+{
+  openPort();
+  serialPort_->setSectionFlushTimeoutMs(20);
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  writeDataAndWait(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Auto Safety Disengaged\n"
+    "ready\n");
+  serialPort_->read();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  serialPort_->read();
+  EXPECT_EQ(observer.statusUpdateCount(), 1);
+
+  // Additional reads without a new STATUS section must not trigger duplicates.
+  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  serialPort_->read();
+  EXPECT_EQ(observer.statusUpdateCount(), 1);
 }
 
 TEST_F(RoamadomeSerialPortTest, SendCommand_AppendsNewlineByDefault)

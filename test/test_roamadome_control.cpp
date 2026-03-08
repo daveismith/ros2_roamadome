@@ -515,6 +515,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_RunsSetupWhenAutoSafetyEngage
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "200";
   info.hardware_parameters["startup_retries"] = "1";
 
@@ -628,6 +629,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_FailsOnProbeTimeout)
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["startup_default_timeout_ms"] = "75";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "75";
   info.hardware_parameters["startup_retries"] = "0";
 
@@ -848,7 +850,7 @@ TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_Info)
   EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
 }
 
-TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_InvalidDefaultsToDebug)
+TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_InvalidFails)
 {
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
   info.hardware_parameters["startup_log_level"] = "invalid_level";
@@ -858,7 +860,72 @@ TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_InvalidDefaultsToD
 
   auto result = controller_->on_init(params);
 
-  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_InvalidFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["auto_mode"] = "tru";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_HomeMode_InvalidFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["home_mode"] = "fals";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_UnsupportedSerialBaud_Fails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_baud"] = "57600";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_InvalidStartupTimeout_Fails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["startup_default_timeout_ms"] = "0";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_InvalidSerialSectionFlushTimeout_Fails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_section_flush_timeout_ms"] = "0";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
 }
 
 /**
@@ -876,6 +943,7 @@ TEST_F(RoamadomeControlTest, StartupSequence_AutoSafetyAlreadyDisabled_SkipsSetu
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["startup_default_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_retries"] = "1";
 
   hardware_interface::HardwareComponentInterfaceParams params;
@@ -1124,6 +1192,7 @@ TEST_F(RoamadomeControlTest, StartupSequence_AutoMode_NeedsEnabling)
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["auto_mode"] = "true";  // Want it enabled
   info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "200";
   info.hardware_parameters["startup_retries"] = "1";
 
@@ -1198,6 +1267,7 @@ TEST_F(RoamadomeControlTest, StartupSequence_AutoMode_AlreadyMatches_SkipsSetCom
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["auto_mode"] = "true";  // Want it enabled
   info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "200";
   info.hardware_parameters["startup_retries"] = "1";
 
@@ -1276,6 +1346,7 @@ TEST_F(RoamadomeControlTest, StartupSequence_HomeMode_NeedsEnabling)
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["home_mode"] = "true";  // Want it enabled
   info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "200";
   info.hardware_parameters["startup_retries"] = "1";
 
@@ -1350,6 +1421,7 @@ TEST_F(RoamadomeControlTest, StartupSequence_HomeMode_AlreadyMatches_SkipsSetCom
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["home_mode"] = "false";  // Want it disabled (default)
   info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "200";
   info.hardware_parameters["startup_retries"] = "1";
 

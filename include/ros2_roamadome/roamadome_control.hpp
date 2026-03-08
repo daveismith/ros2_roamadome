@@ -130,17 +130,12 @@ private:
     uint32_t report_ms = 0;
     bool probe_process_seen = false;
     bool probe_invalid_seen = false;
-    bool status_received = false;
-    bool config_received = false;
     bool auto_safety_engaged = true;
     std::string failure_reason;
 
     // Configuration storage (protected by startupContext_mutex_)
     std::map<std::string, std::string> config_map;
     std::chrono::steady_clock::time_point config_timestamp;
-    bool initial_config_read = false;
-    bool config_verify_read = false;
-    bool autosafety_valid = false;
   };
 
   // Helper methods for startup state machine
@@ -178,12 +173,6 @@ private:
   // Logging and hardware connection
   rclcpp::Logger logger_;
 
-  std::vector<std::string> exported_state_interface_names_;
-  //std::vector<hardware_interface::StateInterface::SharedPtr> ordered_exported_state_interfaces_;
-  //std::unordered_map<std::string, hardware_interface::StateInterface::SharedPtr>
-  //  exported_state_interfaces_;
-  std::vector<double> state_interfaces_values_;
-
   double position_;
   double velocity_;
 
@@ -192,10 +181,10 @@ private:
 
   // Command mode state tracking
   CommandMode currentMode_ = CommandMode::IDLE;
-  CommandMode previousMode_ = CommandMode::IDLE;
   double lastSentPosition_ = -1.0;  // Track last sent position to avoid redundant commands
   double lastSentVelocity_ = 0.0;   // Track last sent velocity to avoid redundant commands
   double maxSpeedRadPerSec_ = 3.14;  // Default: ~180°/s (configurable via parameter)
+  uint32_t serialSectionFlushTimeoutMs_ = 500;
 
   std::unique_ptr<RoamadomeSerialPort> serialHandler_;
   std::string serialPort_;
@@ -207,7 +196,6 @@ private:
   uint32_t startupMaxRetries_ = 1;
   uint32_t startupLoopSleepMs_ = 10;
   uint32_t configStaleWarningMs_ = 30000;
-  std::optional<uint32_t> setupGoodMaxSpeed_;
   std::array<StartupCommandInfo, 8> startupCommandTable_{};
   bool startupCommandTableInitialized_ = false;
 
@@ -264,20 +252,8 @@ public:
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
       std::lock_guard<std::mutex> lock(controller_->startupContext_mutex_);
-      controller_->startupContext_.config_received = true;
       controller_->startupContext_.config_map = config;
       controller_->startupContext_.config_timestamp = std::chrono::steady_clock::now();
-
-      // Set appropriate flags based on which command triggered this config update
-      if (controller_->startupContext_.current_command.has_value()) {
-        if (*controller_->startupContext_.current_command == StartupCommandId::CONFIG_INITIAL) {
-          controller_->startupContext_.initial_config_read = true;
-        } else if (*controller_->startupContext_.current_command ==
-          StartupCommandId::VERIFY_AUTOSAFETY)
-        {
-          controller_->startupContext_.config_verify_read = true;
-        }
-      }
 
       RCLCPP_INFO(controller_->logger_, "Config received:");
       for (const auto & [key, value] : config) {
@@ -287,7 +263,6 @@ public:
 
     void onStatusUpdate(const std::vector<std::string> & status) override
     {
-      controller_->startupContext_.status_received = true;
       RCLCPP_INFO(controller_->logger_, "Status received:");
       for (const auto & line : status) {
         std::string lowered_line = line;

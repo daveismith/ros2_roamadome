@@ -1,4 +1,5 @@
 #include "ros2_roamadome/roamadome_control.hpp"
+#include "ros2_roamadome/parameter_parser.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -11,6 +12,9 @@
 #include <string_view>
 #include <thread>
 #include <time.h>
+#include <limits>
+#include <unordered_map>
+#include <vector>
 
 namespace ros2_roamadome
 {
@@ -82,7 +86,7 @@ std::string buildTransitionLambdaFailure(const std::string & reason)
 RoamadomeControl::RoamadomeControl()
 : logger_(rclcpp::get_logger("RoamadomeControl")), position_(0.0), velocity_(0.0),
   cmd_position_(0.0), cmd_velocity_(0.0),
-  currentMode_(CommandMode::IDLE), previousMode_(CommandMode::IDLE),
+  currentMode_(CommandMode::IDLE),
   lastSentPosition_(-1.0), lastSentVelocity_(0.0)
 {
   std::cout << "RoamadomeControl initialized." << std::endl;
@@ -121,159 +125,130 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     //RCLCPP_INFO(logger_, "Initializing RoamadomeControl with params: %s", params.name.c_str());
   RCLCPP_INFO(logger_, "Initializing RoamadomeControl with params: %s", info_.name.c_str());
 
-  try {
-    auto it = info_.hardware_parameters.find("serial_port");
-    if (it != info_.hardware_parameters.end()) {
-      serialPort_ = it->second;
-    } else {
-      RCLCPP_ERROR(logger_, "serial_port Parameter Not Found");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-  } catch (...) {
-    RCLCPP_ERROR(logger_, "Failed to find serial_port parameter");
+  const auto & parameters = info_.hardware_parameters;
+
+  if (!parseRequiredStringParameter(parameters, logger_, "serial_port", &serialPort_)) {
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  try {
-    auto it = info_.hardware_parameters.find("serial_baud");
-    if (it != info_.hardware_parameters.end()) {
-      serialBaud_ = static_cast<uint32_t>(std::stoul(it->second));
-    } else {
-      RCLCPP_WARN(logger_, "serial_baud not found, defaulting to 115200");
-      serialBaud_ = 115200;
-    }
-  } catch (const std::out_of_range & oor) {
-    RCLCPP_ERROR(logger_, "serial_baud out of range");
+  auto baud_validator = [this](uint32_t baud) {
+      return std::any_of(
+        std::begin(mSupportedBaudRates),
+        std::end(mSupportedBaudRates),
+        [baud](uint32_t supported_baud) {return baud == supported_baud;});
+    };
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "serial_baud",
+      115200,
+      baud_validator,
+      "one of {2400, 9600, 19200, 38400, 115200}",
+      &serialBaud_))
+  {
     return hardware_interface::CallbackReturn::ERROR;
-  } catch (const std::invalid_argument & ia) {
-    RCLCPP_ERROR(logger_, "serial_baud has invalid format");
+  }
+
+  if (!parseOptionalDoubleParameter(
+      parameters,
+      logger_,
+      "max_speed_rad_per_sec",
+      3.14,
+      [](double value) {return value > 0.0;},
+      "> 0",
+      &maxSpeedRadPerSec_))
+  {
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // Parse optional max_speed_rad_per_sec parameter
-  try {
-    auto it = info_.hardware_parameters.find("max_speed_rad_per_sec");
-    if (it != info_.hardware_parameters.end()) {
-      maxSpeedRadPerSec_ = std::stod(it->second);
-      if (maxSpeedRadPerSec_ <= 0.0) {
-        RCLCPP_WARN(logger_, "max_speed_rad_per_sec must be positive, using default 3.14");
-        maxSpeedRadPerSec_ = 3.14;
-      }
-    } else {
-      RCLCPP_INFO(logger_, "max_speed_rad_per_sec not found, using default 3.14 rad/s");
-      maxSpeedRadPerSec_ = 3.14;
-    }
-  } catch (const std::invalid_argument & ia) {
-    RCLCPP_WARN(logger_, "max_speed_rad_per_sec has invalid format, using default 3.14");
-    maxSpeedRadPerSec_ = 3.14;
+  if (!parseOptionalBoolParameter(parameters, logger_, "auto_mode", false, &autoModeEnabled_)) {
+    return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // Parse optional auto_mode parameter (default: false)
-  try {
-    auto it = info_.hardware_parameters.find("auto_mode");
-    if (it != info_.hardware_parameters.end()) {
-      std::string value_lower = it->second;
-      std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(),
-        [](unsigned char c) {return static_cast<char>(std::tolower(c));});
-      autoModeEnabled_ = (value_lower == "true" || value_lower == "1" || value_lower == "yes");
-      RCLCPP_INFO(logger_, "auto_mode configured: %s", autoModeEnabled_ ? "enabled" : "disabled");
-    } else {
-      RCLCPP_INFO(logger_, "auto_mode not specified, defaulting to disabled");
-      autoModeEnabled_ = false;
-    }
-  } catch (const std::exception & ex) {
-    RCLCPP_WARN(logger_, "Failed to parse auto_mode parameter, using default (false): %s",
-      ex.what());
-    autoModeEnabled_ = false;
+  if (!parseOptionalBoolParameter(parameters, logger_, "home_mode", false, &homeModeEnabled_)) {
+    return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // Parse optional home_mode parameter (default: false)
-  try {
-    auto it = info_.hardware_parameters.find("home_mode");
-    if (it != info_.hardware_parameters.end()) {
-      std::string value_lower = it->second;
-      std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(),
-        [](unsigned char c) {return static_cast<char>(std::tolower(c));});
-      homeModeEnabled_ = (value_lower == "true" || value_lower == "1" || value_lower == "yes");
-      RCLCPP_INFO(logger_, "home_mode configured: %s", homeModeEnabled_ ? "enabled" : "disabled");
-    } else {
-      RCLCPP_INFO(logger_, "home_mode not specified, defaulting to disabled");
-      homeModeEnabled_ = false;
-    }
-  } catch (const std::exception & ex) {
-    RCLCPP_WARN(logger_, "Failed to parse home_mode parameter, using default (false): %s",
-      ex.what());
-    homeModeEnabled_ = false;
+  if (!parseOptionalEnumParameter(
+      parameters,
+      logger_,
+      "startup_log_level",
+      "debug",
+      {"debug", "info"},
+      &startupLogLevel_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // Parse optional startup_log_level parameter (default: "debug")
-  try {
-    auto it = info_.hardware_parameters.find("startup_log_level");
-    if (it != info_.hardware_parameters.end()) {
-      std::string value_lower = it->second;
-      std::transform(value_lower.begin(), value_lower.end(), value_lower.begin(),
-        [](unsigned char c) {return static_cast<char>(std::tolower(c));});
-      if (value_lower == "debug" || value_lower == "info") {
-        startupLogLevel_ = value_lower;
-        RCLCPP_INFO(logger_, "startup_log_level configured: %s", startupLogLevel_.c_str());
-      } else {
-        RCLCPP_WARN(logger_,
-            "Invalid startup_log_level '%s', must be 'debug' or 'info'. Using default 'debug'",
-          it->second.c_str());
-        startupLogLevel_ = "debug";
-      }
-    } else {
-      RCLCPP_INFO(logger_, "startup_log_level not specified, defaulting to 'debug'");
-      startupLogLevel_ = "debug";
-    }
-  } catch (const std::exception & ex) {
-    RCLCPP_WARN(logger_, "Failed to parse startup_log_level parameter, using default (debug): %s",
-      ex.what());
-    startupLogLevel_ = "debug";
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "startup_default_timeout_ms",
+      1000,
+      [](uint32_t value) {return value > 0;},
+      "> 0",
+      &startupDefaultTimeoutMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
   }
 
-  try {
-    auto timeout_it = info_.hardware_parameters.find("startup_default_timeout_ms");
-    if (timeout_it != info_.hardware_parameters.end()) {
-      startupDefaultTimeoutMs_ = static_cast<uint32_t>(std::stoul(timeout_it->second));
-      if (0 == startupDefaultTimeoutMs_) {
-        RCLCPP_WARN(logger_, "startup_default_timeout_ms must be > 0, using 1000");
-        startupDefaultTimeoutMs_ = 1000;
-      }
-    }
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "startup_report_timeout_ms",
+      startupDefaultTimeoutMs_,
+      [](uint32_t value) {return value > 0;},
+      "> 0",
+      &startupReportTimeoutMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
-    auto report_timeout_it = info_.hardware_parameters.find("startup_report_timeout_ms");
-    if (report_timeout_it != info_.hardware_parameters.end()) {
-      startupReportTimeoutMs_ = static_cast<uint32_t>(std::stoul(report_timeout_it->second));
-      if (0 == startupReportTimeoutMs_) {
-        RCLCPP_WARN(logger_, "startup_report_timeout_ms must be > 0, using default timeout");
-        startupReportTimeoutMs_ = startupDefaultTimeoutMs_;
-      }
-    } else {
-      startupReportTimeoutMs_ = startupDefaultTimeoutMs_;
-    }
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "startup_setup_timeout_ms",
+      10000,
+      [](uint32_t value) {return value > 0;},
+      "> 0",
+      &startupSetupTimeoutMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
-    auto setup_timeout_it = info_.hardware_parameters.find("startup_setup_timeout_ms");
-    if (setup_timeout_it != info_.hardware_parameters.end()) {
-      startupSetupTimeoutMs_ = static_cast<uint32_t>(std::stoul(setup_timeout_it->second));
-      if (0 == startupSetupTimeoutMs_) {
-        RCLCPP_WARN(logger_, "startup_setup_timeout_ms must be > 0, using 10000");
-        startupSetupTimeoutMs_ = 10000;
-      }
-    }
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "startup_retries",
+      1,
+      nullptr,
+      "",
+      &startupMaxRetries_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
-    auto retries_it = info_.hardware_parameters.find("startup_retries");
-    if (retries_it != info_.hardware_parameters.end()) {
-      startupMaxRetries_ = static_cast<uint32_t>(std::stoul(retries_it->second));
-    }
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "startup_config_stale_warning_ms",
+      30000,
+      nullptr,
+      "",
+      &configStaleWarningMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
-    auto stale_warning_it = info_.hardware_parameters.find("startup_config_stale_warning_ms");
-    if (stale_warning_it != info_.hardware_parameters.end()) {
-      configStaleWarningMs_ = static_cast<uint32_t>(std::stoul(stale_warning_it->second));
-    }
-
-  } catch (const std::exception & ex) {
-    RCLCPP_ERROR(logger_, "Invalid startup timing parameters: %s", ex.what());
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "serial_section_flush_timeout_ms",
+      500,
+      [](uint32_t value) {return value > 0;},
+      "> 0",
+      &serialSectionFlushTimeoutMs_))
+  {
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -308,6 +283,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
 
   // Create and setup the serial handler
   serialHandler_ = std::make_unique<RoamadomeSerialPort>(serialPort_);
+  serialHandler_->setSectionFlushTimeoutMs(serialSectionFlushTimeoutMs_);
 
   // Create and register the serial event handler (observer pattern)
   serialEventHandler_ = std::make_unique<SerialEventHandler>(this);
@@ -378,16 +354,10 @@ void RoamadomeControl::resetStartupContext(StartupContext * context, uint32_t ti
   context->report_ms = 0;
   context->probe_process_seen = false;
   context->probe_invalid_seen = false;
-  context->status_received = false;
-  context->config_received = false;
   context->auto_safety_engaged = true;
   context->failure_reason.clear();
   context->config_map.clear();
   context->config_timestamp = std::chrono::steady_clock::time_point();
-  context->initial_config_read = false;
-  context->config_verify_read = false;
-  context->autosafety_valid = false;
-  setupGoodMaxSpeed_.reset();
 }
 
 void RoamadomeControl::initializeStartupCommandTable()
@@ -827,29 +797,6 @@ void RoamadomeControl::handleStartupUnhandledLine(const std::string & line)
     return;
   }
 
-  const std::string speed_key = "good max speed:";
-  size_t key_pos = lowered_line.find(speed_key);
-  if (key_pos != std::string::npos) {
-    std::string speed_value = line.substr(key_pos + speed_key.size());
-    const size_t first_non_space = speed_value.find_first_not_of(" \t");
-    if (first_non_space == std::string::npos) {
-      return;
-    }
-
-    speed_value.erase(0, first_non_space);
-    const size_t last_non_space = speed_value.find_last_not_of(" \t");
-    speed_value.erase(last_non_space + 1);
-
-    try {
-      int parsed = std::stoi(speed_value);
-      if (parsed >= 0) {
-        setupGoodMaxSpeed_ = static_cast<uint32_t>(parsed);
-        RCLCPP_INFO(logger_, "Startup setup GOOD MAX SPEED captured: %u", *setupGoodMaxSpeed_);
-      }
-    } catch (const std::exception &) {
-      RCLCPP_WARN(logger_, "Failed to parse GOOD MAX SPEED from line: %s", line.c_str());
-    }
-  }
 }
 
 void RoamadomeControl::logStartupTransition(const std::string & message)
@@ -1022,7 +969,6 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
     sendStopCommand();
   }
 
-  previousMode_ = currentMode_;
   currentMode_ = new_mode;
 
   RCLCPP_INFO(logger_, "Command mode switched to: %s",

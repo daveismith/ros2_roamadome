@@ -8,6 +8,7 @@
 #include <optional>
 #include <map>
 #include <cstdint>
+#include <chrono>
 
 namespace ros2_roamadome
 {
@@ -125,6 +126,15 @@ public:
    */
   bool read();
 
+  /// @brief Configure idle timeout used to flush pending CONFIG/STATUS sections.
+  /// @param timeout_ms Flush timeout in milliseconds (must be > 0)
+  void setSectionFlushTimeoutMs(uint32_t timeout_ms)
+  {
+    if (0 < timeout_ms) {
+      sectionFlushTimeoutMs_ = timeout_ms;
+    }
+  }
+
   /**
    * @brief Register a callback for position updates
    * @param callback Function called as callback(degrees, radians)
@@ -192,6 +202,8 @@ private:
   bool exclusiveAccess_;
   std::map<std::string, std::string> currentConfig_;
   std::vector<std::string> currentStatus_;
+  uint32_t sectionFlushTimeoutMs_ = 500;
+  std::chrono::steady_clock::time_point lastSectionLineTime_{};
 
   // Callbacks
   std::function<void(uint32_t, double)> positionCallback_;
@@ -261,6 +273,10 @@ private:
    * @param status The status lines
    */
   void notifyStatusObservers(const std::vector<std::string> & status);
+
+  void flushActiveSectionIfReady(bool force_flush);
+  bool hasPendingSectionData() const;
+  void beginSection(ParseState next_state);
 };
 
 }  // namespace ros2_roamadome
