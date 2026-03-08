@@ -51,7 +51,6 @@ protected:
 
     // Create the specified number of joints
     for (size_t i = 0; i < num_joints; ++i) {
-      hardware_interface::JointInfo joint;
       // ComponentInfo represents a hardware component (joint in this case)
       hardware_interface::ComponentInfo component;
       component.name = (i == 0) ? "dome_joint" : ("dome_joint_" + std::to_string(i));

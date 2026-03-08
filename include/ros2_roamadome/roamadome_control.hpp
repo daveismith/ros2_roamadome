@@ -8,6 +8,8 @@
 #include "hardware_interface/actuator_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <array>
 #include <cstdint>

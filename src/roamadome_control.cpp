@@ -3,6 +3,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cmath>
 #include <exception>
 #include <iostream>
 #include <sstream>  // C++17 replacement for std::format (C++20)
@@ -701,7 +702,11 @@ hardware_interface::return_type RoamadomeControl::read(
   (void) period;
 
   if (serialHandler_) {
-    serialHandler_->read();
+    if (true != serialHandler_->read()) {
+      // Handle read failure if necessary (e.g., log, set error state, etc.)
+      RCLCPP_ERROR(logger_, "Serial read failed during read()");
+      return return_type::ERROR;
+    }
   }
 
   return return_type::OK;
@@ -817,9 +822,9 @@ uint32_t RoamadomeControl::normalizeAngleDegrees(double radians) const
   // Convert radians to degrees
   double degrees = radiansToDegrees(radians);
 
-  // Normalize to [0, 359] using modulo arithmetic
-  // First convert to integer to avoid floating point issues
-  int32_t deg_int = static_cast<int32_t>(degrees);
+  // Normalize to [0, 359] using modulo arithmetic with floor for correct negative handling
+  // std::floor ensures negative angles wrap correctly (e.g., -0.5° → -1 → 359)
+  int32_t deg_int = static_cast<int32_t>(std::floor(degrees));
 
   // Apply modulo to handle negative angles and > 359
   deg_int = deg_int % 360;
