@@ -9,6 +9,7 @@ This package provides a ROS2 control hardware interface that integrates with the
 ### Key Features
 
 - **Hardware Interface**: Implements `ActuatorInterface` for ROS2 control framework
+- **Startup State Machine**: Configure lifecycle uses a read-driven command/probe sequence
 - **State Interfaces**: Exposes dome joint position and velocity feedback
 - **Command Interfaces**: Accepts position and velocity commands for dome movement
 - **Pluginlib-based**: Loadable as a ROS2 controller plugin
@@ -53,7 +54,7 @@ The controller exports the following state interfaces for the `dome_joint`:
 | Interface | Description |
 |-----------|-------------|
 | `dome_joint/position` | Current dome position in radians (0-2π) |
-| `dome_joint/velocity` | Current dome angular velocity in rad/s |
+| `dome_joint/velocity` | Current dome angular velocity in rad/s (currently 0.0 unless device velocity feedback is added) |
 
 ### Command Interfaces
 
@@ -121,7 +122,44 @@ For detailed hardware setup instructions, see the [DomeControlFirmware README](h
 
 ## Serial Protocol
 
-This interface communicates with the hardware via the Roam-A-Dome serial protocol. Common commands:
+This interface communicates with the hardware via the Roam-A-Dome serial protocol.
+
+### Startup Configure Sequence
+
+During `on_configure()`, startup runs in two phases:
+
+1. **Baud sweep pre-step**: iterate `mSupportedBaudRates` and send `#DPSERIALBAUD<target>` at each baud (best-effort, no explicit completion check).
+2. **State machine phase**: send each startup command and then send `#DPINVALID` as a completion probe:
+  - `#DPSTATUS` -> `#DPINVALID`
+  - Optional branch: `#DPSETUP` -> `#DPINVALID` when status includes `Auto Safety Engaged`
+  - `#DPCONFIG` -> `#DPINVALID`
+  - `#DPREPORT<ms>` -> `#DPINVALID`
+
+`#DPSTATUS` branch behavior:
+
+- If status contains `Auto Safety Engaged`, startup runs `#DPSETUP`.
+- If status contains `Auto Safety Disengaged`, startup skips `#DPSETUP` and goes to `#DPCONFIG`.
+
+`#DPSETUP` uses a fixed 10 second timeout.
+
+When setup output contains `GOOD MAX SPEED: <n>`, the value is parsed and stored for future use.
+
+Probe completion requires reading both lines from serial:
+
+- `PROCESS: "#DPINVALID"`
+- `Invalid`
+
+Each wait state performs serial reads in a loop with configurable timeout/retries (`startup_default_timeout_ms`, `startup_setup_timeout_ms`, `startup_report_timeout_ms`, `startup_retries`).
+
+Transitions are data-driven from a startup command table and resolved after each probe completes, so command-specific branches can be added without introducing new wait states.
+
+### Command Terminators
+
+`RoamadomeSerialPort::sendCommand()` appends a newline terminator by default when missing. Pass `append_terminator=false` for raw writes.
+
+### Common Runtime Commands
+
+Common commands:
 
 - `:DPA<degrees>` - Rotate dome to absolute position (0-359°)
 - `:DPH` - Return dome to home position
@@ -132,10 +170,22 @@ For a complete list of commands and configuration options, refer to the [hardwar
 
 ## Development Notes
 
-- The current implementation provides basic state/command interface export and is structured for future hardware communication development
-- Position wraps around at 2π radians (360°)
-- Velocity is calculated based on position commands and timing
-- Read/write cycle timing is managed by the ROS2 controller manager
+- Startup configuration uses a deterministic state machine to sequence status/config/report setup.
+- Position wraps around at 2π radians (360°).
+- Velocity state feedback is currently exported but not computed from hardware feedback yet.
+- Read/write cycle timing is managed by the ROS2 controller manager.
+
+## Testing
+
+Run package tests with:
+
+```bash
+cd ~/r2_ws
+colcon test --packages-select ros2_roamadome
+colcon test-result --verbose
+```
+
+Current tests include serial parser behavior, command terminator behavior, and configure-state-machine startup coverage.
 
 ## License
 

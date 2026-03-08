@@ -18,7 +18,10 @@ find_package(rclcpp REQUIRED)
 find_package(pluginlib REQUIRED)
 
 # build library
-add_library(ros2_roamadome src/roamadome_control.cpp)
+add_library(ros2_roamadome
+  src/roamadome_control.cpp
+  src/roamadome_serial_port.cpp
+)
 add_library(ros2_roamadome::roamadome_control ALIAS ros2_roamadome)
 target_compile_features(ros2_roamadome PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 target_include_directories(ros2_roamadome PUBLIC
@@ -58,6 +61,7 @@ install(TARGETS roamadome_control_node
   DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
@@ -67,13 +71,29 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  # Unit tests for RoamadomeSerialPort
+  ament_add_gtest(test_roamadome_serial_port test/test_roamadome_serial_port.cpp)
+  target_include_directories(test_roamadome_serial_port PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_roamadome_serial_port ros2_roamadome)
+
+  # Unit tests for RoamadomeControl
+  ament_add_gtest(test_roamadome_control test/test_roamadome_control.cpp)
+  target_include_directories(test_roamadome_control PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_roamadome_control ros2_roamadome)
 endif()
 
 ament_export_include_directories(
   "include/${PROJECT_NAME}"
 )
 ament_export_libraries(
-  roamadome_control
+  ros2_roamadome
 )
 ament_export_targets(
   export_${PROJECT_NAME}
