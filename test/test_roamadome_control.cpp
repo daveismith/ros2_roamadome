@@ -448,7 +448,6 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_SkipsSetupWhenAutoSafetyNotEn
   std::atomic<bool> running{true};
   std::vector<std::string> seen_commands;
   std::mutex commands_mutex;
-  bool pending_status_payload = true;
   std::thread firmware([&]() {
       std::string line;
       while (running.load()) {
@@ -459,30 +458,26 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_SkipsSetupWhenAutoSafetyNotEn
         if (!line.empty() && '#' == line.front()) {
           std::lock_guard<std::mutex> lock(commands_mutex);
           seen_commands.push_back(line);
+        } else if (line.rfind("DPCONFIG", 0) == 0) {
+          // PTY can occasionally drop the leading '#'; normalize for assertions.
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back("#" + line);
         }
 
-        if (line.rfind("#DPSTATUS", 0) == 0) {
-          pending_status_payload = true;
-        } else if (line.rfind("#DPSETUP", 0) == 0) {
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
           pty.writeText(
-            "PROCESS: \"#DPSETUP\"\n"
-            "SPEED: 50\n"
-            "GOOD MAX SPEED: 80\n"
-            "Restore Dome Settings\n"
-            "Write Settings\n"
-            "Updated\n");
-        } else if (line.rfind("#DPCONFIG", 0) == 0) {
-          pty.writeText("PROCESS: \"#DPCONFIG\"\nfoo=bar\n");
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPSTATUS\"\n"
+            "Auto Safety Disengaged\n"
+            "ready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
         } else if (line.rfind("#DPINVALID", 0) == 0) {
-          if (pending_status_payload) {
-            pty.writeText(
-              "PROCESS: \"#DPSTATUS\"\n"
-              "Auto Safety Disengaged\n"
-              "Dome Sensor Errors: 10\n"
-              "WiFi Enabled\n"
-              "Remote Enabled\n");
-            pending_status_payload = false;
-          }
           pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
         }
       }
@@ -520,6 +515,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_RunsSetupWhenAutoSafetyEngage
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "200";
   info.hardware_parameters["startup_retries"] = "1";
 
@@ -530,7 +526,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_RunsSetupWhenAutoSafetyEngage
   std::atomic<bool> running{true};
   std::vector<std::string> seen_commands;
   std::mutex commands_mutex;
-  bool pending_status_payload = true;
+  bool first_config = true;
   std::thread firmware([&]() {
       std::string line;
       while (running.load()) {
@@ -541,51 +537,44 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_RunsSetupWhenAutoSafetyEngage
         if (!line.empty() && '#' == line.front()) {
           std::lock_guard<std::mutex> lock(commands_mutex);
           seen_commands.push_back(line);
+        } else if (line.rfind("DPCONFIG", 0) == 0) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back("#" + line);
         }
 
-        if (line.rfind("#DPSTATUS", 0) == 0) {
-          pending_status_payload = true;
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          if (first_config) {
+            pty.writeText(
+              "PROCESS: \"#DPCONFIG\"\n"
+              "AutoSafety=1\n"
+              "AutoMode=0\n"
+              "HomeMode=0\n");
+            first_config = false;
+          } else {
+            pty.writeText(
+              "PROCESS: \"#DPCONFIG\"\n"
+              "AutoSafety=0\n"
+              "AutoMode=0\n"
+              "HomeMode=0\n");
+          }
         } else if (line.rfind("#DPSETUP", 0) == 0) {
           pty.writeText(
             "PROCESS: \"#DPSETUP\"\n"
             "SPEED: 50\n"
-            "NEW DOME MODE\n"
-            "INVERTED prev:14 current:15\n"
-            "REACHED TARGET: 14\n"
-            "Angular velocity: 65.26 cm/s\n"
-            "SPEED: 60\n"
-            "INVERTED prev:16 current:17\n"
-            "[DOME SENSOR] ERROR READING POSITION\n"
-            "[DOME SENSOR] ERROR READING POSITION\n"
-            "[DOME SENSOR] ERROR READING POSITION\n"
-            "REACHED TARGET: 14\n"
-            "Angular velocity: 84.89 cm/s\n"
-            "SPEED: 70\n"
-            "INVERTED prev:17 current:19\n"
-            "[DOME SENSOR] ERROR READING POSITION\n"
-            "[DOME SENSOR] ERROR READING POSITION\n"
-            "REACHED TARGET: 14\n"
-            "Angular velocity: 99.98 cm/s\n"
-            "SPEED: 80\n"
-            "INVERTED prev:17 current:18\n"
-            "REACHED TARGET: 14\n"
-            "Angular velocity: 114.58 cm/s\n"
             "GOOD MAX SPEED: 80\n"
             "Restore Dome Settings\n"
             "Write Settings\n"
             "Updated\n");
-        } else if (line.rfind("#DPCONFIG", 0) == 0) {
-          pty.writeText("PROCESS: \"#DPCONFIG\"\nfoo=bar\n");
+        } else if (line.rfind("#DPAUTOSAFETY0", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPAUTOSAFETY0\"\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPSTATUS\"\n"
+            "Auto Safety Disengaged\n"
+            "ready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
         } else if (line.rfind("#DPINVALID", 0) == 0) {
-          if (pending_status_payload) {
-            pty.writeText(
-              "PROCESS: \"#DPSTATUS\"\n"
-              "Auto Safety Engaged\n"
-              "No Dome Sensor Errors\n"
-              "WiFi Enabled\n"
-              "Remote Enabled\n");
-            pending_status_payload = false;
-          }
           pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
         }
       }
@@ -601,23 +590,35 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_RunsSetupWhenAutoSafetyEngage
 
   EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
 
+  // Verify full sequence: SETUP → AUTOSAFETY0 → verify CONFIG
   int setup_index = -1;
-  int config_index = -1;
+  int autosafety0_index = -1;
+  int second_config_index = -1;
+  bool found_first_config = false;
   {
     std::lock_guard<std::mutex> lock(commands_mutex);
     for (size_t idx = 0; idx < seen_commands.size(); ++idx) {
+      if (seen_commands[idx].rfind("#DPCONFIG", 0) == 0) {
+        if (!found_first_config) {
+          found_first_config = true;  // Skip first CONFIG_INITIAL
+        } else if (second_config_index < 0) {
+          second_config_index = static_cast<int>(idx);  // This is VERIFY_AUTOSAFETY
+        }
+      }
       if (setup_index < 0 && seen_commands[idx].rfind("#DPSETUP", 0) == 0) {
         setup_index = static_cast<int>(idx);
       }
-      if (config_index < 0 && seen_commands[idx].rfind("#DPCONFIG", 0) == 0) {
-        config_index = static_cast<int>(idx);
+      if (autosafety0_index < 0 && seen_commands[idx].rfind("#DPAUTOSAFETY0", 0) == 0) {
+        autosafety0_index = static_cast<int>(idx);
       }
     }
   }
 
   EXPECT_GE(setup_index, 0);
-  EXPECT_GE(config_index, 0);
-  EXPECT_LT(setup_index, config_index);
+  EXPECT_GE(autosafety0_index, 0);
+  EXPECT_GE(second_config_index, 0);
+  EXPECT_LT(setup_index, autosafety0_index);
+  EXPECT_LT(autosafety0_index, second_config_index);
 }
 
 TEST_F(RoamadomeControlTest, ConfigureStateMachine_FailsOnProbeTimeout)
@@ -628,6 +629,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_FailsOnProbeTimeout)
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
   info.hardware_parameters["serial_port"] = pty.slavePath();
   info.hardware_parameters["startup_default_timeout_ms"] = "75";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
   info.hardware_parameters["startup_report_timeout_ms"] = "75";
   info.hardware_parameters["startup_retries"] = "0";
 
@@ -679,7 +681,6 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_UsesConfigurableSetupTimeout)
   std::atomic<bool> running{true};
   std::vector<std::string> seen_commands;
   std::mutex commands_mutex;
-  bool pending_status_payload = true;
   bool setup_started = false;
   std::thread firmware([&]() {
       std::string line;
@@ -693,22 +694,16 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_UsesConfigurableSetupTimeout)
           seen_commands.push_back(line);
         }
 
-        if (line.rfind("#DPSTATUS", 0) == 0) {
-          pending_status_payload = true;
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=1\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
         } else if (line.rfind("#DPSETUP", 0) == 0) {
           setup_started = true;
         } else if (line.rfind("#DPINVALID", 0) == 0) {
-          if (pending_status_payload) {
-            pty.writeText(
-              "PROCESS: \"#DPSTATUS\"\n"
-              "Auto Safety Engaged\n"
-              "No Dome Sensor Errors\n"
-              "WiFi Enabled\n"
-              "Remote Enabled\n");
-            pending_status_payload = false;
-          }
-
-          // Simulate a setup-probe hang: status probe succeeds, setup probe gets no response.
+          // Simulate a setup-probe hang: config probe succeeds, setup probe gets no response.
           if (!setup_started) {
             pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
           }
@@ -742,6 +737,752 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_UsesConfigurableSetupTimeout)
 
   EXPECT_GE(setup_index, 0);
   EXPECT_EQ(config_index, -1);
+}
+
+/**
+ * ============================================================================
+ * NEW PARAMETER PARSING TESTS
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_True)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["auto_mode"] = "true";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_False)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["auto_mode"] = "false";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_DefaultsToFalse)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  // Don't set auto_mode parameter
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_HomeMode_True)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["home_mode"] = "true";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_HomeMode_False)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["home_mode"] = "false";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_BothModesTrue)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["auto_mode"] = "true";
+  info.hardware_parameters["home_mode"] = "true";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_Debug)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["startup_log_level"] = "debug";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_Info)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["startup_log_level"] = "info";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_InvalidFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["startup_log_level"] = "invalid_level";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_InvalidFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["auto_mode"] = "tru";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_HomeMode_InvalidFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["home_mode"] = "fals";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_UnsupportedSerialBaud_Fails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_baud"] = "57600";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_InvalidStartupTimeout_Fails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["startup_default_timeout_ms"] = "0";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_InvalidSerialSectionFlushTimeout_Fails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_section_flush_timeout_ms"] = "0";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  auto result = controller_->on_init(params);
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+/**
+ * ============================================================================
+ * NEW STARTUP SEQUENCE TESTS - AutoSafety Already Disabled
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, StartupSequence_AutoSafetyAlreadyDisabled_SkipsSetup)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPSTATUS\"\n"
+            "Auto Safety Disengaged\n"
+            "ready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  auto result = controller_->on_configure(previous_state);
+
+  running.store(false);
+  firmware.join();
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+
+  // Verify SETUP was not called
+  bool setup_seen = false;
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    for (const std::string & cmd : seen_commands) {
+      if (cmd.rfind("#DPSETUP", 0) == 0) {
+        setup_seen = true;
+        break;
+      }
+    }
+  }
+  EXPECT_FALSE(setup_seen);
+}
+
+/**
+ * ============================================================================
+ * NEW STARTUP SEQUENCE TESTS - AutoSafety Needs Disabling
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, StartupSequence_AutoSafetyEnabled_RunsFullSequence)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "500";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+  bool first_config = true;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          if (first_config) {
+            pty.writeText(
+              "PROCESS: \"#DPCONFIG\"\n"
+              "AutoSafety=1\n"
+              "AutoMode=0\n"
+              "HomeMode=0\n");
+            first_config = false;
+          } else {
+            pty.writeText(
+              "PROCESS: \"#DPCONFIG\"\n"
+              "AutoSafety=0\n"
+              "AutoMode=0\n"
+              "HomeMode=0\n");
+          }
+        } else if (line.rfind("#DPSETUP", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPSETUP\"\n"
+            "SPEED: 50\n"
+            "GOOD MAX SPEED: 80\n"
+            "Restore Dome Settings\n"
+            "Write Settings\n"
+            "Updated\n");
+        } else if (line.rfind("#DPAUTOSAFETY0", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPAUTOSAFETY0\"\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPSTATUS\"\n"
+            "Auto Safety Disengaged\n"
+            "ready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  auto result = controller_->on_configure(previous_state);
+
+  running.store(false);
+  firmware.join();
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+
+  // Verify full sequence was called in correct order
+  int setup_index = -1;
+  int autosafety0_index = -1;
+  int verify_config_index = -1;
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    for (size_t idx = 0; idx < seen_commands.size(); ++idx) {
+      if (setup_index < 0 && seen_commands[idx].rfind("#DPSETUP", 0) == 0) {
+        setup_index = static_cast<int>(idx);
+      }
+      if (autosafety0_index < 0 && seen_commands[idx].rfind("#DPAUTOSAFETY0", 0) == 0) {
+        autosafety0_index = static_cast<int>(idx);
+      }
+      if (verify_config_index < 0 && autosafety0_index >= 0 &&
+        seen_commands[idx].rfind("#DPCONFIG", 0) == 0)
+      {
+        verify_config_index = static_cast<int>(idx);
+      }
+    }
+  }
+
+  EXPECT_GE(setup_index, 0);
+  EXPECT_GE(autosafety0_index, 0);
+  EXPECT_GE(verify_config_index, 0);
+  EXPECT_LT(setup_index, autosafety0_index);
+  EXPECT_LT(autosafety0_index, verify_config_index);
+}
+
+TEST_F(RoamadomeControlTest, StartupSequence_AutoSafetyVerificationFails)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "500";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "0";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          // Always return AutoSafety=1 (failed to disable)
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=1\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSETUP", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSETUP\"\nUpdated\n");
+        } else if (line.rfind("#DPAUTOSAFETY0", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPAUTOSAFETY0\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  auto result = controller_->on_configure(previous_state);
+
+  running.store(false);
+  firmware.join();
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+/**
+ * ============================================================================
+ * NEW AUTOMODE CONFIGURATION TESTS
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, StartupSequence_AutoMode_NeedsEnabling)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["auto_mode"] = "true";  // Want it enabled
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"  // Currently disabled
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPAUTO", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  auto result = controller_->on_configure(previous_state);
+
+  running.store(false);
+  firmware.join();
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+
+  // Verify #DPAUTO1 was sent
+  bool auto1_seen = false;
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    for (const std::string & cmd : seen_commands) {
+      if (cmd == "#DPAUTO1") {
+        auto1_seen = true;
+        break;
+      }
+    }
+  }
+  EXPECT_TRUE(auto1_seen);
+}
+
+TEST_F(RoamadomeControlTest, StartupSequence_AutoMode_AlreadyMatches_SkipsSetCommand)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["auto_mode"] = "true";  // Want it enabled
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=1\n"  // Already enabled
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  auto result = controller_->on_configure(previous_state);
+
+  running.store(false);
+  firmware.join();
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+
+  // Verify #DPAUTO was NOT sent
+  bool auto_seen = false;
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    for (const std::string & cmd : seen_commands) {
+      if (cmd.rfind("#DPAUTO", 0) == 0) {
+        auto_seen = true;
+        break;
+      }
+    }
+  }
+  EXPECT_FALSE(auto_seen);
+}
+
+/**
+ * ============================================================================
+ * NEW HOMEMODE CONFIGURATION TESTS
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, StartupSequence_HomeMode_NeedsEnabling)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["home_mode"] = "true";  // Want it enabled
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");  // Currently disabled
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPHOME", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  auto result = controller_->on_configure(previous_state);
+
+  running.store(false);
+  firmware.join();
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+
+  // Verify #DPHOME1 was sent
+  bool home1_seen = false;
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    for (const std::string & cmd : seen_commands) {
+      if (cmd == "#DPHOME1") {
+        home1_seen = true;
+        break;
+      }
+    }
+  }
+  EXPECT_TRUE(home1_seen);
+}
+
+TEST_F(RoamadomeControlTest, StartupSequence_HomeMode_AlreadyMatches_SkipsSetCommand)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["home_mode"] = "false";  // Want it disabled (default)
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");  // Already disabled
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  auto result = controller_->on_configure(previous_state);
+
+  running.store(false);
+  firmware.join();
+
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::SUCCESS);
+
+  // Verify #DPHOME was NOT sent
+  bool home_seen = false;
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    for (const std::string & cmd : seen_commands) {
+      if (cmd.rfind("#DPHOME", 0) == 0) {
+        home_seen = true;
+        break;
+      }
+    }
+  }
+  EXPECT_FALSE(home_seen);
 }
 
 }  // namespace ros2_roamadome

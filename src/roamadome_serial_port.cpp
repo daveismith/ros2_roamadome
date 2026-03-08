@@ -35,10 +35,29 @@ bool RoamadomeSerialPort::open()
     return false;
   }
 
-  int fd = ::open(portName_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+  // Open with O_NONBLOCK to avoid blocking on FIFOs/devices that aren't ready
+  int fd = ::open(portName_.c_str(), O_RDWR | O_NOCTTY | O_SYNC | O_NONBLOCK);
   if (fd < 0) {
     std::cerr << "Error opening " << portName_ << ": " << strerror(errno) << std::endl;
     return false;
+  }
+
+  // For real TTY devices (not FIFOs/pipes), clear O_NONBLOCK after opening to avoid
+  // EAGAIN/EWOULDBLOCK on write() calls during transient backpressure.
+  // VMIN=0/VTIME=0 (set in configurePort) will still provide non-blocking reads.
+  // For non-TTY devices (FIFOs), keep O_NONBLOCK since they don't support termios.
+  if (isatty(fd)) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+      std::cerr << "Error getting fd flags: " << strerror(errno) << std::endl;
+      ::close(fd);
+      return false;
+    }
+    if (fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == -1) {
+      std::cerr << "Error clearing O_NONBLOCK: " << strerror(errno) << std::endl;
+      ::close(fd);
+      return false;
+    }
   }
 
   serialFd_ = fd;
@@ -189,12 +208,18 @@ bool RoamadomeSerialPort::read()
   ssize_t n = ::read(serialFd_, buffer, sizeof(buffer) - 1);
 
   if (n < 0) {
+    // In non-blocking mode, EAGAIN/EWOULDBLOCK means no data available (not an error)
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      flushActiveSectionIfReady(false);
+      return true;
+    }
     std::cerr << "Error reading from serial port: " << strerror(errno) << std::endl;
     return false;
   }
 
   if (n == 0) {
-    // No data available (non-blocking), continue
+    // No new data available: flush pending section only if idle timeout has elapsed.
+    flushActiveSectionIfReady(false);
     return true;
   }
 
@@ -218,43 +243,24 @@ bool RoamadomeSerialPort::read()
       continue;
     }
 
-    // C++17 compatible prefix check (starts_with is C++20)
+    // C++17 compatible prefix check (starts_with is C++20).
     if (line.size() >= 10 && line.compare(0, 10, "PROCESS: \"") == 0) {
-      // Notify any pending data at end of read
-      if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
-        notifyConfigObservers(currentConfig_);
-        currentConfig_.clear();
-      } else if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
-        notifyStatusObservers(currentStatus_);
-        currentStatus_.clear();
+      // Clear command boundary: flush exactly once for the previous active section.
+      flushActiveSectionIfReady(true);
+
+      if (line.find("PROCESS: \"#DPCONFIG\"") != std::string::npos) {
+        beginSection(ParseState::CONFIG);
+        continue;
       }
 
-        // clear out any existing state
+      if (line.find("PROCESS: \"#DPSTATUS\"") != std::string::npos) {
+        beginSection(ParseState::STATUS);
+        continue;
+      }
+
       parseState_ = ParseState::NONE;
-    }
-
-    // Check if this line starts a new PROCESS command
-    // If so, flush any pending data from the previous state and transition
-    if (line.find("PROCESS: \"#DPCONFIG\"") != std::string::npos) {
-      // Flush previous state if needed
-      if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
-        notifyStatusObservers(currentStatus_);
-        currentStatus_.clear();
-      }
-      parseState_ = ParseState::CONFIG;
-      currentConfig_.clear();
-      continue;  // Skip further processing of this PROCESS line
-    }
-
-    if (line.find("PROCESS: \"#DPSTATUS\"") != std::string::npos) {
-      // Flush previous state if needed
-      if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
-        notifyConfigObservers(currentConfig_);
-        currentConfig_.clear();
-      }
-      parseState_ = ParseState::STATUS;
-      currentStatus_.clear();
-      continue;  // Skip further processing of this PROCESS line
+      notifyUnhandledLineObservers(line);
+      continue;
     }
 
     // Always try to parse position line first (regardless of state)
@@ -270,22 +276,15 @@ bool RoamadomeSerialPort::read()
       auto kv = parseConfigLine(line);
       if (kv) {
         currentConfig_[kv->first] = kv->second;
+        lastSectionLineTime_ = std::chrono::steady_clock::now();
       }
     } else if (parseState_ == ParseState::STATUS) {
       currentStatus_.push_back(line);
+      lastSectionLineTime_ = std::chrono::steady_clock::now();
     } else {
       // In NONE state, line doesn't match known patterns
       notifyUnhandledLineObservers(line);
     }
-  }
-
-  // Notify any pending data at end of read
-  if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
-    notifyConfigObservers(currentConfig_);
-    currentConfig_.clear();
-  } else if (parseState_ == ParseState::STATUS && !currentStatus_.empty()) {
-    notifyStatusObservers(currentStatus_);
-    currentStatus_.clear();
   }
 
   return true;
@@ -466,6 +465,50 @@ void RoamadomeSerialPort::notifyStatusObservers(const std::vector<std::string> &
   for (auto observer : observers_) {
     observer->onStatusUpdate(status);
   }
+}
+
+void RoamadomeSerialPort::flushActiveSectionIfReady(bool force_flush)
+{
+  if (!hasPendingSectionData()) {
+    if (force_flush) {
+      parseState_ = ParseState::NONE;
+    }
+    return;
+  }
+
+  const bool timed_out = !force_flush &&
+    (std::chrono::steady_clock::now() - lastSectionLineTime_) >=
+    std::chrono::milliseconds(sectionFlushTimeoutMs_);
+  if (!force_flush && !timed_out) {
+    return;
+  }
+
+  if (parseState_ == ParseState::CONFIG) {
+    notifyConfigObservers(currentConfig_);
+    currentConfig_.clear();
+  } else if (parseState_ == ParseState::STATUS) {
+    notifyStatusObservers(currentStatus_);
+    currentStatus_.clear();
+  }
+
+  parseState_ = ParseState::NONE;
+}
+
+bool RoamadomeSerialPort::hasPendingSectionData() const
+{
+  return (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) ||
+         (parseState_ == ParseState::STATUS && !currentStatus_.empty());
+}
+
+void RoamadomeSerialPort::beginSection(ParseState next_state)
+{
+  parseState_ = next_state;
+  if (next_state == ParseState::CONFIG) {
+    currentConfig_.clear();
+  } else if (next_state == ParseState::STATUS) {
+    currentStatus_.clear();
+  }
+  lastSectionLineTime_ = std::chrono::steady_clock::now();
 }
 
 }  // namespace ros2_roamadome

@@ -21,6 +21,7 @@ find_package(pluginlib REQUIRED)
 add_library(ros2_roamadome
   src/roamadome_control.cpp
   src/roamadome_serial_port.cpp
+  src/parameter_parser.cpp
 )
 add_library(ros2_roamadome::roamadome_control ALIAS ros2_roamadome)
 target_compile_features(ros2_roamadome PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17

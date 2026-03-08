@@ -14,7 +14,9 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -82,9 +84,13 @@ private:
 
   enum class StartupCommandId
   {
-    STATUS = 0,
+    CONFIG_INITIAL = 0,
     SETUP,
-    CONFIG,
+    AUTOSAFETY0,
+    VERIFY_AUTOSAFETY,
+    STATUS,
+    SET_AUTOMODE,
+    SET_HOMEMODE,
     REPORT
   };
 
@@ -109,6 +115,12 @@ private:
 
   struct StartupContext
   {
+    /// @note: startupContext_ is accessed from both the serial reader callback
+    /// (which runs during serialHandler_->read() via SerialEventHandler::onConfigUpdate)
+    /// and from the startup state machine (which runs synchronously during on_configure).
+    /// Access to config_map and config_timestamp fields are protected by
+    /// startupContext_mutex_ to ensure thread-safe delivery of configuration snapshots.
+
     StartupState state = StartupState::SEND_COMMAND;
     std::optional<StartupCommandId> current_command;
     std::string formatted_command;
@@ -119,10 +131,12 @@ private:
     uint32_t report_ms = 0;
     bool probe_process_seen = false;
     bool probe_invalid_seen = false;
-    bool status_received = false;
-    bool config_received = false;
     bool auto_safety_engaged = true;
     std::string failure_reason;
+
+    // Configuration storage (protected by startupContext_mutex_)
+    std::map<std::string, std::string> config_map;
+    std::chrono::steady_clock::time_point config_timestamp;
   };
 
   // Helper methods for startup state machine
@@ -147,6 +161,7 @@ private:
   bool retryCurrentStartupCommand(StartupContext * context);
   bool runStartupStateMachine(uint32_t report_ms);
   void handleStartupUnhandledLine(const std::string & line);
+  void logStartupTransition(const std::string & message);
 
   // Helper methods for command handling
   uint32_t normalizeAngleDegrees(double radians) const;
@@ -159,12 +174,6 @@ private:
   // Logging and hardware connection
   rclcpp::Logger logger_;
 
-  std::vector<std::string> exported_state_interface_names_;
-  //std::vector<hardware_interface::StateInterface::SharedPtr> ordered_exported_state_interfaces_;
-  //std::unordered_map<std::string, hardware_interface::StateInterface::SharedPtr>
-  //  exported_state_interfaces_;
-  std::vector<double> state_interfaces_values_;
-
   double position_;
   double velocity_;
 
@@ -173,10 +182,10 @@ private:
 
   // Command mode state tracking
   CommandMode currentMode_ = CommandMode::IDLE;
-  CommandMode previousMode_ = CommandMode::IDLE;
   double lastSentPosition_ = -1.0;  // Track last sent position to avoid redundant commands
   double lastSentVelocity_ = 0.0;   // Track last sent velocity to avoid redundant commands
   double maxSpeedRadPerSec_ = 3.14;  // Default: ~180°/s (configurable via parameter)
+  uint32_t serialSectionFlushTimeoutMs_ = 500;
 
   std::unique_ptr<RoamadomeSerialPort> serialHandler_;
   std::string serialPort_;
@@ -187,11 +196,17 @@ private:
   uint32_t startupSetupTimeoutMs_ = 10000;
   uint32_t startupMaxRetries_ = 1;
   uint32_t startupLoopSleepMs_ = 10;
-  std::optional<uint32_t> setupGoodMaxSpeed_;
-  std::array<StartupCommandInfo, 4> startupCommandTable_{};
+  uint32_t configStaleWarningMs_ = 30000;
+  std::array<StartupCommandInfo, 8> startupCommandTable_{};
   bool startupCommandTableInitialized_ = false;
 
+  // Configuration flags
+  bool autoModeEnabled_ = false;
+  bool homeModeEnabled_ = false;
+  std::string startupLogLevel_ = "debug";
+
   StartupContext startupContext_;
+  mutable std::mutex startupContext_mutex_;  // Protects startupContext_.config_map and config_timestamp
 
   const uint32_t mSupportedBaudRates[5] = {
     2400,
@@ -237,7 +252,10 @@ public:
 
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
-      controller_->startupContext_.config_received = true;
+      std::lock_guard<std::mutex> lock(controller_->startupContext_mutex_);
+      controller_->startupContext_.config_map = config;
+      controller_->startupContext_.config_timestamp = std::chrono::steady_clock::now();
+
       RCLCPP_INFO(controller_->logger_, "Config received:");
       for (const auto & [key, value] : config) {
         RCLCPP_INFO(controller_->logger_, "  %s = %s", key.c_str(), value.c_str());
@@ -246,7 +264,6 @@ public:
 
     void onStatusUpdate(const std::vector<std::string> & status) override
     {
-      controller_->startupContext_.status_received = true;
       RCLCPP_INFO(controller_->logger_, "Status received:");
       for (const auto & line : status) {
         std::string lowered_line = line;

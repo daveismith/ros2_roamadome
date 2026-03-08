@@ -44,12 +44,14 @@ public:
   {
     configUpdateCalled_ = true;
     lastConfig_ = config;
+    configUpdateCount_++;
   }
 
   void onStatusUpdate(const std::vector<std::string> & status) override
   {
     statusUpdateCalled_ = true;
     lastStatus_ = status;
+    statusUpdateCount_++;
   }
 
   bool positionUpdateCalled() const {return positionUpdateCalled_;}
@@ -67,6 +69,8 @@ public:
 
   int positionUpdateCount() const {return positionUpdateCount_;}
   int unhandledLineCount() const {return unhandledLineCount_;}
+  int configUpdateCount() const {return configUpdateCount_;}
+  int statusUpdateCount() const {return statusUpdateCount_;}
 
   void reset()
   {
@@ -83,6 +87,8 @@ public:
     lastStatus_.clear();
     positionUpdateCount_ = 0;
     unhandledLineCount_ = 0;
+    configUpdateCount_ = 0;
+    statusUpdateCount_ = 0;
   }
 
 private:
@@ -101,6 +107,8 @@ private:
 
   int positionUpdateCount_ = 0;
   int unhandledLineCount_ = 0;
+  int configUpdateCount_ = 0;
+  int statusUpdateCount_ = 0;
 };
 
 // Helper class for managing temporary named pipes
@@ -860,23 +868,24 @@ TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesConfigData)
   // We expect the config to be flushed (notified) before the status begins
   writeDataAndWait(
     "PROCESS: \"#DPCONFIG\"\n"
-    "setting1=enabled\n"
-    "setting2=high\n"
+    "a=1\n"
+    "b=2\n"
     "PROCESS: \"#DPSTATUS\"\n"
-    "Device ready\n"
+    "ok\n"
+    "PROCESS: \"#DPINVALID\"\n"
   );
   serialPort_->read();
 
   EXPECT_TRUE(observer.configUpdateCalled())
     << "Config should be notified when state transitions away from CONFIG";
   EXPECT_EQ(observer.lastConfig().size(), 2);
-  EXPECT_EQ(observer.lastConfig().at("setting1"), "enabled");
-  EXPECT_EQ(observer.lastConfig().at("setting2"), "high");
+  EXPECT_EQ(observer.lastConfig().at("a"), "1");
+  EXPECT_EQ(observer.lastConfig().at("b"), "2");
 
   EXPECT_TRUE(observer.statusUpdateCalled())
     << "Status should be notified after config";
   EXPECT_EQ(observer.lastStatus().size(), 1);
-  EXPECT_EQ(observer.lastStatus()[0], "Device ready");
+  EXPECT_EQ(observer.lastStatus()[0], "ok");
 }
 
 TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesStatusData)
@@ -890,23 +899,24 @@ TEST_F(RoamadomeSerialPortTest, TestStateTransitionFlushesStatusData)
   // We expect the status to be flushed (notified) before the config begins
   writeDataAndWait(
     "PROCESS: \"#DPSTATUS\"\n"
-    "Status line 1\n"
-    "Status line 2\n"
+    "s1\n"
+    "s2\n"
     "PROCESS: \"#DPCONFIG\"\n"
-    "newkey=newvalue\n"
+    "k=v\n"
+    "PROCESS: \"#DPINVALID\"\n"
   );
   serialPort_->read();
 
   EXPECT_TRUE(observer.statusUpdateCalled())
     << "Status should be notified when state transitions away from STATUS";
   EXPECT_EQ(observer.lastStatus().size(), 2);
-  EXPECT_EQ(observer.lastStatus()[0], "Status line 1");
-  EXPECT_EQ(observer.lastStatus()[1], "Status line 2");
+  EXPECT_EQ(observer.lastStatus()[0], "s1");
+  EXPECT_EQ(observer.lastStatus()[1], "s2");
 
   EXPECT_TRUE(observer.configUpdateCalled())
     << "Config should be notified after status";
   EXPECT_EQ(observer.lastConfig().size(), 1);
-  EXPECT_EQ(observer.lastConfig().at("newkey"), "newvalue");
+  EXPECT_EQ(observer.lastConfig().at("k"), "v");
 }
 
 TEST_F(RoamadomeSerialPortTest, TestConsecutiveProcessLines)
@@ -923,6 +933,7 @@ TEST_F(RoamadomeSerialPortTest, TestConsecutiveProcessLines)
     "cfg1=val1\n"
     "PROCESS: \"#DPSTATUS\"\n"
     "status_line\n"
+    "PROCESS: \"#DPINVALID\"\n"
   );
   serialPort_->read();
 
@@ -967,10 +978,18 @@ TEST_F(RoamadomeSerialPortTest, TestPositionWithConfigAndStatusMixed)
   writeDataAndWait("DOME POSITION: 1\n");
   serialPort_->read();
 
-  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nx=1\nDOME POSITION: 2\n");
+  writeDataAndWait(
+    "PROCESS: \"#DPCONFIG\"\n"
+    "x=1\n"
+    "DOME POSITION: 2\n"
+    "PROCESS: \"#DPINVALID\"\n");
   serialPort_->read();
 
-  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nLine A\nDOME POSITION: 3\n");
+  writeDataAndWait(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Line A\n"
+    "DOME POSITION: 3\n"
+    "PROCESS: \"#DPINVALID\"\n");
   serialPort_->read();
 
   // Verify all types of data were processed
@@ -980,6 +999,148 @@ TEST_F(RoamadomeSerialPortTest, TestPositionWithConfigAndStatusMixed)
     << "Should process config";
   EXPECT_GE(statusCount, 1)
     << "Should process status";
+}
+
+TEST_F(RoamadomeSerialPortTest, TestRealisticBatchedConfigStatusAcrossChunkedReads)
+{
+  // Validates realistic startup configuration data split across multiple serial reads.
+  // This simulates firmware sending config/status parameters in multiple chunks,
+  // with batch delivery to observers.
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Chunk 1: Start CONFIG state and first parameter
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nAutoSafety=1\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.configUpdateCalled())
+    << "Config should not be notified yet (stream still in CONFIG state)";
+
+  // Chunk 2: More config parameters
+  writeDataAndWait("AutoMode=0\nHomeMode=1\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.configUpdateCalled())
+    << "Config should not be notified yet (still in CONFIG state)";
+
+  // Chunk 3: Transition to STATUS state triggers config flush and batch delivery
+  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nAuto Safety Engaged\nSystem Ready\n");
+  serialPort_->read();
+  EXPECT_TRUE(observer.configUpdateCalled())
+    << "Config should be batched and notified on state transition";
+
+  // Verify complete config batch was delivered
+  const auto & config = observer.lastConfig();
+  EXPECT_EQ(config.size(), 3);
+  EXPECT_EQ(config.at("AutoSafety"), "1");
+  EXPECT_EQ(config.at("AutoMode"), "0");
+  EXPECT_EQ(config.at("HomeMode"), "1");
+
+  observer.reset();
+
+  // Chunk 4: Transition away from STATUS (back to CONFIG) to flush status data
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nAutoSafety=0\n");
+  serialPort_->read();
+
+  // Now status should be notified
+  EXPECT_TRUE(observer.statusUpdateCalled())
+    << "Status should be notified when transitioning away from STATUS state";
+  const auto & status = observer.lastStatus();
+  EXPECT_EQ(status.size(), 2);
+  EXPECT_EQ(status[0], "Auto Safety Engaged");
+  EXPECT_EQ(status[1], "System Ready");
+}
+
+TEST_F(RoamadomeSerialPortTest, TestRealisticStatusWithProbeCompletion)
+{
+  // Validates realistic startup probe completion sequence with actual parameter names.
+  // Demonstrates that status data is buffered until a state transition flushes it.
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // Chunk 1: Run #DPSTATUS command, get response start
+  writeDataAndWait("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.statusUpdateCalled())
+    << "Status not delivered yet (still in STATUS state)";
+
+  // Chunk 2: More status lines
+  writeDataAndWait("System Ready\nGood Max Speed: 400\n");
+  serialPort_->read();
+  EXPECT_FALSE(observer.statusUpdateCalled())
+    << "Status not delivered yet (still in STATUS state)";
+
+  // Chunk 3: Send probe and transition back to CONFIG to trigger status flush
+  writeDataAndWait("PROCESS: \"#DPCONFIG\"\nAutoSafety=1\n");
+  serialPort_->read();
+
+  // Status should now be delivered (flushed on transition away)
+  EXPECT_TRUE(observer.statusUpdateCalled())
+    << "Status should be delivered after transitioning away from STATUS state";
+  const auto & status = observer.lastStatus();
+  EXPECT_GE(status.size(), 2);
+  EXPECT_EQ(status[0], "Auto Safety Disengaged");
+  EXPECT_EQ(status[1], "System Ready");
+}
+
+TEST_F(RoamadomeSerialPortTest, SectionFlushOccursOnTimeoutInLaterReadCall)
+{
+  openPort();
+  serialPort_->setSectionFlushTimeoutMs(20);
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  writeDataAndWait(
+    "PROCESS: \"#DPCONFIG\"\n"
+    "AutoSafety=1\n"
+    "AutoMode=0\n");
+  serialPort_->read();
+
+  EXPECT_FALSE(observer.configUpdateCalled())
+    << "Config should not flush before timeout without a section boundary";
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  serialPort_->read();
+
+  ASSERT_TRUE(observer.configUpdateCalled())
+    << "Config should flush on a later read() call after timeout";
+  EXPECT_EQ(observer.configUpdateCount(), 1);
+  EXPECT_EQ(observer.lastConfig().size(), 2);
+
+  const auto autosafety_it = observer.lastConfig().find("AutoSafety");
+  ASSERT_NE(autosafety_it, observer.lastConfig().end());
+  EXPECT_EQ(autosafety_it->second, "1");
+
+  const auto automode_it = observer.lastConfig().find("AutoMode");
+  ASSERT_NE(automode_it, observer.lastConfig().end());
+  EXPECT_EQ(automode_it->second, "0");
+}
+
+TEST_F(RoamadomeSerialPortTest, SectionFlushIsOneShotAfterTimeout)
+{
+  openPort();
+  serialPort_->setSectionFlushTimeoutMs(20);
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  writeDataAndWait(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Auto Safety Disengaged\n"
+    "ready\n");
+  serialPort_->read();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  serialPort_->read();
+  EXPECT_EQ(observer.statusUpdateCount(), 1);
+
+  // Additional reads without a new STATUS section must not trigger duplicates.
+  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  serialPort_->read();
+  EXPECT_EQ(observer.statusUpdateCount(), 1);
 }
 
 TEST_F(RoamadomeSerialPortTest, SendCommand_AppendsNewlineByDefault)
