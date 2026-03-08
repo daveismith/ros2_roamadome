@@ -4,8 +4,8 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
-#include <format>
 #include <iostream>
+#include <sstream>  // C++17 replacement for std::format (C++20)
 #include <string>
 #include <string_view>
 #include <thread>
@@ -25,6 +25,55 @@ bool matchesInterfaceName(const std::string & interface_name, std::string_view e
     std::string_view(interface_name) :
     std::string_view(interface_name).substr(separator_pos + 1);
   return candidate == expected_name;
+}
+
+/// @brief Constructs a command string by concatenating prefix and value
+/// @tparam TValue Value type that supports stream insertion (uint32_t, int32_t, etc.)
+/// @param prefix Command prefix string (e.g., "#DPSERIALBAUD", ":DPA")
+/// @param value Numeric value to append
+/// @return Formatted command string
+template<typename TValue>
+std::string buildCommand(const char * prefix, TValue value)
+{
+  std::ostringstream stream;
+  stream << prefix << value;
+  return stream.str();
+}
+
+/// @brief Builds a failure reason message with required prefix, label, and optional suffix
+/// @param prefix Text before label (e.g., "failed to send ")
+/// @param label Context label (e.g., command name)
+/// @param suffix Text after label (e.g., "")
+/// @return Formatted failure message
+std::string buildSingleLabelFailure(
+  const char * prefix,
+  const std::string & label,
+  const char * suffix)
+{
+  std::ostringstream stream;
+  stream << prefix << label << suffix;
+  return stream.str();
+}
+
+/// @brief Builds a retry limit exceeded failure message
+/// @param label Command label that timed out
+/// @param retries Number of retries attempted
+/// @return Formatted failure message
+std::string buildRetryLimitFailure(const std::string & label, uint32_t retries)
+{
+  std::ostringstream stream;
+  stream << "startup command '" << label << "' timed out after " << retries << " retries";
+  return stream.str();
+}
+
+/// @brief Builds an exception message from a startup transition lambda
+/// @param reason Exception message from the lambda
+/// @return Formatted failure message
+std::string buildTransitionLambdaFailure(const std::string & reason)
+{
+  std::ostringstream stream;
+  stream << "startup transition lambda failed: " << reason;
+  return stream.str();
 }
 
 }  // namespace
@@ -172,7 +221,9 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
 hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   const rclcpp_lifecycle::State & previous_state)
 {
-  const struct timespec ts = {.tv_sec = 0, .tv_nsec = 500000000};
+  struct timespec ts = {};
+  ts.tv_sec = 0;
+  ts.tv_nsec = 500000000;
   if (0 == info_.rw_rate) {
     RCLCPP_ERROR(logger_, "Invalid rw_rate: 0");
     return hardware_interface::CallbackReturn::ERROR;
@@ -198,7 +249,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  const std::string baud_command = std::format("#DPSERIALBAUD{}", serialBaud_);
+  const std::string baud_command = buildCommand("#DPSERIALBAUD", serialBaud_);
   RCLCPP_INFO(logger_, "Baud Command is %s", baud_command.c_str());
 
   // Keep baud sweep separate from startup state machine. It may produce responses,
@@ -266,52 +317,53 @@ void RoamadomeControl::resetStartupContext(StartupContext * context, uint32_t ti
 
 void RoamadomeControl::initializeStartupCommandTable()
 {
-  startupCommandTable_[0] = StartupCommandInfo{
-    .id = StartupCommandId::STATUS,
-    .command_template = "#DPSTATUS",
-    .timeout_ms = startupDefaultTimeoutMs_,
-    .is_terminal_command = false,
-    .linear_next = std::nullopt,
-    .command_formatter = std::nullopt,
-    .transition_lambda = [](const StartupContext & ctx,
-      RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
-        (void)ctrl;
-        return ctx.auto_safety_engaged ? StartupCommandId::SETUP : StartupCommandId::CONFIG;
-      }
-  };
+  StartupCommandInfo status_command;
+  status_command.id = StartupCommandId::STATUS;
+  status_command.command_template = "#DPSTATUS";
+  status_command.timeout_ms = startupDefaultTimeoutMs_;
+  status_command.is_terminal_command = false;
+  status_command.linear_next = std::nullopt;
+  status_command.command_formatter = std::nullopt;
+  status_command.transition_lambda = [](const StartupContext & ctx,
+    RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
+      (void)ctrl;
+      return ctx.auto_safety_engaged ? StartupCommandId::SETUP : StartupCommandId::CONFIG;
+    };
+  startupCommandTable_[0] = status_command;
 
-  startupCommandTable_[1] = StartupCommandInfo{
-    .id = StartupCommandId::SETUP,
-    .command_template = "#DPSETUP",
-    .timeout_ms = startupSetupTimeoutMs_,
-    .is_terminal_command = false,
-    .linear_next = StartupCommandId::CONFIG,
-    .command_formatter = std::nullopt,
-    .transition_lambda = std::nullopt
-  };
+  StartupCommandInfo setup_command;
+  setup_command.id = StartupCommandId::SETUP;
+  setup_command.command_template = "#DPSETUP";
+  setup_command.timeout_ms = startupSetupTimeoutMs_;
+  setup_command.is_terminal_command = false;
+  setup_command.linear_next = StartupCommandId::CONFIG;
+  setup_command.command_formatter = std::nullopt;
+  setup_command.transition_lambda = std::nullopt;
+  startupCommandTable_[1] = setup_command;
 
-  startupCommandTable_[2] = StartupCommandInfo{
-    .id = StartupCommandId::CONFIG,
-    .command_template = "#DPCONFIG",
-    .timeout_ms = startupDefaultTimeoutMs_,
-    .is_terminal_command = false,
-    .linear_next = StartupCommandId::REPORT,
-    .command_formatter = std::nullopt,
-    .transition_lambda = std::nullopt
-  };
+  StartupCommandInfo config_command;
+  config_command.id = StartupCommandId::CONFIG;
+  config_command.command_template = "#DPCONFIG";
+  config_command.timeout_ms = startupDefaultTimeoutMs_;
+  config_command.is_terminal_command = false;
+  config_command.linear_next = StartupCommandId::REPORT;
+  config_command.command_formatter = std::nullopt;
+  config_command.transition_lambda = std::nullopt;
+  startupCommandTable_[2] = config_command;
 
-  startupCommandTable_[3] = StartupCommandInfo{
-    .id = StartupCommandId::REPORT,
-    .command_template = "#DPREPORT{}",
-    .timeout_ms = startupReportTimeoutMs_,
-    .is_terminal_command = true,
-    .linear_next = std::nullopt,
-    .command_formatter = [](const StartupContext & ctx, RoamadomeControl * ctrl) -> std::string {
-        (void)ctrl;
-        return std::format("#DPREPORT{}", ctx.report_ms);
-      },
-    .transition_lambda = std::nullopt
-  };
+  StartupCommandInfo report_command;
+  report_command.id = StartupCommandId::REPORT;
+  report_command.command_template = "#DPREPORT{}";
+  report_command.timeout_ms = startupReportTimeoutMs_;
+  report_command.is_terminal_command = true;
+  report_command.linear_next = std::nullopt;
+  report_command.command_formatter =
+    [](const StartupContext & ctx, RoamadomeControl * ctrl) -> std::string {
+      (void)ctrl;
+      return buildCommand("#DPREPORT", ctx.report_ms);
+    };
+  report_command.transition_lambda = std::nullopt;
+  startupCommandTable_[3] = report_command;
 
   startupCommandTableInitialized_ = true;
 }
@@ -362,14 +414,14 @@ bool RoamadomeControl::sendStartupCommandWithProbe(
   context->probe_invalid_seen = false;
 
   if (!serialHandler_->sendCommand(context->formatted_command)) {
-    context->failure_reason = std::format("failed to send {}", context->state_label);
+    context->failure_reason = buildSingleLabelFailure("failed to send ", context->state_label, "");
     context->state = StartupState::FAILED;
     return false;
   }
 
   if (!serialHandler_->sendCommand("#DPINVALID")) {
-    context->failure_reason = std::format(
-      "failed to send completion probe for {}", context->state_label);
+    context->failure_reason = buildSingleLabelFailure(
+      "failed to send completion probe for ", context->state_label, "");
     context->state = StartupState::FAILED;
     return false;
   }
@@ -432,10 +484,7 @@ void RoamadomeControl::transitionStartupState(
 bool RoamadomeControl::retryCurrentStartupCommand(StartupContext * context)
 {
   if (context->retries_used >= startupMaxRetries_) {
-    context->failure_reason = std::format(
-      "startup command '{}' timed out after {} retries",
-      context->state_label,
-      context->retries_used);
+    context->failure_reason = buildRetryLimitFailure(context->state_label, context->retries_used);
     context->state = StartupState::FAILED;
     return false;
   }
@@ -453,13 +502,15 @@ bool RoamadomeControl::retryCurrentStartupCommand(StartupContext * context)
     startupMaxRetries_);
 
   if (!serialHandler_->sendCommand(context->formatted_command)) {
-    context->failure_reason = std::format("retry send failed for '{}'", context->state_label);
+    context->failure_reason = buildSingleLabelFailure(
+      "retry send failed for '", context->state_label, "'");
     context->state = StartupState::FAILED;
     return false;
   }
 
   if (!serialHandler_->sendCommand("#DPINVALID")) {
-    context->failure_reason = std::format("retry probe failed for '{}'", context->state_label);
+    context->failure_reason = buildSingleLabelFailure(
+      "retry probe failed for '", context->state_label, "'");
     context->state = StartupState::FAILED;
     return false;
   }
@@ -492,8 +543,7 @@ bool RoamadomeControl::runStartupStateMachine(uint32_t report_ms)
           try {
             next_command = resolveStartupNextCommand(startupContext_);
           } catch (const std::exception & ex) {
-            startupContext_.failure_reason = std::format(
-              "startup transition lambda failed: {}", ex.what());
+            startupContext_.failure_reason = buildTransitionLambdaFailure(ex.what());
             startupContext_.state = StartupState::FAILED;
             RCLCPP_ERROR(logger_, "Startup transition lambda exception: %s", ex.what());
             break;
@@ -606,7 +656,9 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
 hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   const rclcpp_lifecycle::State & previous_state)
 {
-  const struct timespec ts = {.tv_sec = 1, .tv_nsec = 0};
+  struct timespec ts = {};
+  ts.tv_sec = 1;
+  ts.tv_nsec = 0;
 
   RCLCPP_INFO(logger_, "Deactivating RoamadomeControl from state: %s",
       previous_state.label().c_str());
@@ -806,7 +858,7 @@ bool RoamadomeControl::sendPositionCommand(uint32_t degrees)
   }
 
   // Format: :DPA<degrees> where degrees is 0-359
-  std::string command = std::format(":DPA{}", degrees);
+  std::string command = buildCommand(":DPA", degrees);
   return serialHandler_->sendCommand(command);
 }
 
@@ -818,7 +870,7 @@ bool RoamadomeControl::sendVelocityCommand(int32_t percentage)
   }
 
   // Format: :DPR<speed> where speed is -100 to 100
-  std::string command = std::format(":DPR{}", percentage);
+  std::string command = buildCommand(":DPR", percentage);
   return serialHandler_->sendCommand(command);
 }
 

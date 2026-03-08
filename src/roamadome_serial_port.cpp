@@ -218,8 +218,9 @@ bool RoamadomeSerialPort::read()
       continue;
     }
 
-    if (line.starts_with("PROCESS: \"")) {
-        // Notify any pending data at end of read
+    // C++17 compatible prefix check (starts_with is C++20)
+    if (line.size() >= 10 && line.compare(0, 10, "PROCESS: \"") == 0) {
+      // Notify any pending data at end of read
       if (parseState_ == ParseState::CONFIG && !currentConfig_.empty()) {
         notifyConfigObservers(currentConfig_);
         currentConfig_.clear();
