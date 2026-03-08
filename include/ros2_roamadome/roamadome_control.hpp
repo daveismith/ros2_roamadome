@@ -10,9 +10,8 @@
 
 #include <chrono>
 #include <array>
-#include <algorithm>
-#include <cctype>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -87,20 +86,23 @@ private:
     REPORT
   };
 
-  enum class StartupTransitionRule
-  {
-    LINEAR_NEXT,
-    STATUS_AUTO_SAFETY_BRANCH,
-    COMPLETE
-  };
+  // Forward declare for type aliases
+  struct StartupContext;
+
+  using CommandFormatterFunc = std::function<std::string(const StartupContext &,
+      RoamadomeControl *)>;
+  using TransitionLambdaFunc = std::function<std::optional<StartupCommandId>(const StartupContext &,
+      RoamadomeControl *)>;
 
   struct StartupCommandInfo
   {
     StartupCommandId id;
     std::string command_template;
     uint32_t timeout_ms;
-    StartupTransitionRule transition_rule;
+    bool is_terminal_command = false;
     std::optional<StartupCommandId> linear_next;
+    std::optional<CommandFormatterFunc> command_formatter;
+    std::optional<TransitionLambdaFunc> transition_lambda;
   };
 
   struct StartupContext
@@ -112,6 +114,7 @@ private:
     std::chrono::steady_clock::time_point state_start;
     uint32_t timeout_ms = 1000;
     uint32_t retries_used = 0;
+    uint32_t report_ms = 0;
     bool probe_process_seen = false;
     bool probe_invalid_seen = false;
     bool status_received = false;
@@ -124,11 +127,12 @@ private:
   void resetStartupContext(StartupContext * context, uint32_t timeout_ms);
   void initializeStartupCommandTable();
   const StartupCommandInfo * findStartupCommandInfo(StartupCommandId command_id) const;
-  std::string formatStartupCommand(StartupCommandId command_id, uint32_t report_ms) const;
+  std::string formatStartupCommand(
+    StartupCommandId command_id,
+    const StartupContext & context) const;
   bool sendStartupCommandWithProbe(
     StartupContext * context,
-    StartupCommandId command_id,
-    uint32_t report_ms);
+    StartupCommandId command_id);
   std::optional<StartupCommandId> resolveStartupNextCommand(
     const StartupContext & context) const;
   bool startupProbeComplete(const StartupContext & context) const;

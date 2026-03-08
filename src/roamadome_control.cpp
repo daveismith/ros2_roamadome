@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <format>
@@ -10,7 +9,6 @@
 #include <string>
 #include <thread>
 #include <time.h>
-#include <unistd.h>
 
 namespace ros2_roamadome
 {
@@ -231,6 +229,7 @@ void RoamadomeControl::resetStartupContext(StartupContext * context, uint32_t ti
   context->state_start = std::chrono::steady_clock::now();
   context->timeout_ms = timeout_ms;
   context->retries_used = 0;
+  context->report_ms = 0;
   context->probe_process_seen = false;
   context->probe_invalid_seen = false;
   context->status_received = false;
@@ -246,32 +245,47 @@ void RoamadomeControl::initializeStartupCommandTable()
     .id = StartupCommandId::STATUS,
     .command_template = "#DPSTATUS",
     .timeout_ms = startupDefaultTimeoutMs_,
-    .transition_rule = StartupTransitionRule::STATUS_AUTO_SAFETY_BRANCH,
-    .linear_next = std::nullopt
+    .is_terminal_command = false,
+    .linear_next = std::nullopt,
+    .command_formatter = std::nullopt,
+    .transition_lambda = [](const StartupContext & ctx,
+      RoamadomeControl * ctrl) -> std::optional<StartupCommandId> {
+        (void)ctrl;
+        return ctx.auto_safety_engaged ? StartupCommandId::SETUP : StartupCommandId::CONFIG;
+      }
   };
 
   startupCommandTable_[1] = StartupCommandInfo{
     .id = StartupCommandId::SETUP,
     .command_template = "#DPSETUP",
     .timeout_ms = startupSetupTimeoutMs_,
-    .transition_rule = StartupTransitionRule::LINEAR_NEXT,
-    .linear_next = StartupCommandId::CONFIG
+    .is_terminal_command = false,
+    .linear_next = StartupCommandId::CONFIG,
+    .command_formatter = std::nullopt,
+    .transition_lambda = std::nullopt
   };
 
   startupCommandTable_[2] = StartupCommandInfo{
     .id = StartupCommandId::CONFIG,
     .command_template = "#DPCONFIG",
     .timeout_ms = startupDefaultTimeoutMs_,
-    .transition_rule = StartupTransitionRule::LINEAR_NEXT,
-    .linear_next = StartupCommandId::REPORT
+    .is_terminal_command = false,
+    .linear_next = StartupCommandId::REPORT,
+    .command_formatter = std::nullopt,
+    .transition_lambda = std::nullopt
   };
 
   startupCommandTable_[3] = StartupCommandInfo{
     .id = StartupCommandId::REPORT,
     .command_template = "#DPREPORT{}",
     .timeout_ms = startupReportTimeoutMs_,
-    .transition_rule = StartupTransitionRule::COMPLETE,
-    .linear_next = std::nullopt
+    .is_terminal_command = true,
+    .linear_next = std::nullopt,
+    .command_formatter = [](const StartupContext & ctx, RoamadomeControl * ctrl) -> std::string {
+        (void)ctrl;
+        return std::format("#DPREPORT{}", ctx.report_ms);
+      },
+    .transition_lambda = std::nullopt
   };
 
   startupCommandTableInitialized_ = true;
@@ -289,16 +303,17 @@ const RoamadomeControl::StartupCommandInfo * RoamadomeControl::findStartupComman
   return nullptr;
 }
 
-std::string RoamadomeControl::formatStartupCommand(StartupCommandId command_id, uint32_t report_ms)
-const
+std::string RoamadomeControl::formatStartupCommand(
+  StartupCommandId command_id,
+  const StartupContext & context) const
 {
   const StartupCommandInfo * command_info = findStartupCommandInfo(command_id);
   if (nullptr == command_info) {
     return "";
   }
 
-  if (StartupCommandId::REPORT == command_id) {
-    return std::format("#DPREPORT{}", report_ms);
+  if (command_info->command_formatter) {
+    return (*command_info->command_formatter)(context, const_cast<RoamadomeControl *>(this));
   }
 
   return command_info->command_template;
@@ -306,8 +321,7 @@ const
 
 bool RoamadomeControl::sendStartupCommandWithProbe(
   StartupContext * context,
-  StartupCommandId command_id,
-  uint32_t report_ms)
+  StartupCommandId command_id)
 {
   const StartupCommandInfo * command_info = findStartupCommandInfo(command_id);
   if (nullptr == command_info) {
@@ -317,7 +331,7 @@ bool RoamadomeControl::sendStartupCommandWithProbe(
   }
 
   context->current_command = command_id;
-  context->formatted_command = formatStartupCommand(command_id, report_ms);
+  context->formatted_command = formatStartupCommand(command_id, *context);
   context->state_label = context->formatted_command;
   context->probe_process_seen = false;
   context->probe_invalid_seen = false;
@@ -356,21 +370,13 @@ std::optional<RoamadomeControl::StartupCommandId> RoamadomeControl::resolveStart
     return std::nullopt;
   }
 
-  switch (command_info->transition_rule) {
-    case StartupTransitionRule::LINEAR_NEXT:
-      return command_info->linear_next;
-
-    case StartupTransitionRule::STATUS_AUTO_SAFETY_BRANCH:
-      if (context.auto_safety_engaged) {
-        return StartupCommandId::SETUP;
-      }
-      return StartupCommandId::CONFIG;
-
-    case StartupTransitionRule::COMPLETE:
-      return std::nullopt;
+  // Try transition lambda first if available
+  if (command_info->transition_lambda) {
+    return (*command_info->transition_lambda)(context, const_cast<RoamadomeControl *>(this));
   }
 
-  return std::nullopt;
+  // Fall back to linear_next
+  return command_info->linear_next;
 }
 
 bool RoamadomeControl::startupProbeComplete(const StartupContext & context) const
@@ -443,6 +449,7 @@ bool RoamadomeControl::runStartupStateMachine(uint32_t report_ms)
   }
 
   resetStartupContext(&startupContext_, startupDefaultTimeoutMs_);
+  startupContext_.report_ms = report_ms;
 
   while (startupContext_.state != StartupState::COMPLETE &&
     startupContext_.state != StartupState::FAILED)
@@ -455,13 +462,27 @@ bool RoamadomeControl::runStartupStateMachine(uint32_t report_ms)
 
     switch (startupContext_.state) {
       case StartupState::SEND_COMMAND: {
-          std::optional<StartupCommandId> next_command = resolveStartupNextCommand(startupContext_);
+          std::optional<StartupCommandId> next_command;
+
+          try {
+            next_command = resolveStartupNextCommand(startupContext_);
+          } catch (const std::exception & ex) {
+            startupContext_.failure_reason = std::format(
+              "startup transition lambda failed: {}", ex.what());
+            startupContext_.state = StartupState::FAILED;
+            RCLCPP_ERROR(logger_, "Startup transition lambda exception: %s", ex.what());
+            break;
+          }
+
           if (!next_command.has_value()) {
-            if (startupContext_.current_command.has_value() &&
-              *startupContext_.current_command == StartupCommandId::REPORT)
-            {
-              startupContext_.state = StartupState::COMPLETE;
-              break;
+            // If the current command is terminal, transition to COMPLETE
+            if (startupContext_.current_command.has_value()) {
+              const StartupCommandInfo * current_cmd_info =
+                findStartupCommandInfo(*startupContext_.current_command);
+              if (nullptr != current_cmd_info && current_cmd_info->is_terminal_command) {
+                startupContext_.state = StartupState::COMPLETE;
+                break;
+              }
             }
 
             startupContext_.failure_reason = "unable to resolve next startup command";
@@ -470,7 +491,7 @@ bool RoamadomeControl::runStartupStateMachine(uint32_t report_ms)
           }
 
           startupContext_.retries_used = 0;
-          if (!sendStartupCommandWithProbe(&startupContext_, *next_command, report_ms)) {
+          if (!sendStartupCommandWithProbe(&startupContext_, *next_command)) {
             break;
           }
           break;
