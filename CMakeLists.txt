@@ -16,12 +16,15 @@ find_package(hardware_interface REQUIRED)
 find_package(controller_manager REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # build library
 add_library(ros2_roamadome
   src/roamadome_control.cpp
+  src/device_parameter_specs.cpp
   src/roamadome_serial_port.cpp
   src/parameter_parser.cpp
+  src/roamadome_config_parser.cpp
 )
 add_library(ros2_roamadome::roamadome_control ALIAS ros2_roamadome)
 target_compile_features(ros2_roamadome PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
@@ -37,6 +40,7 @@ ament_target_dependencies(ros2_roamadome PUBLIC
   controller_manager
   rclcpp
   pluginlib
+  std_srvs
 )
 pluginlib_export_plugin_description_file(hardware_interface robot_hardware.xml)
 

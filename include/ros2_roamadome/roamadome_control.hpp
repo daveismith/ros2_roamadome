@@ -2,9 +2,11 @@
 #define roamadome_control__ROAMADOME_CONTROL_HPP_
 
 #include "rclcpp/rclcpp.hpp"
+#include "std_srvs/srv/trigger.hpp"
 
 #include "ros2_roamadome/visibility_control.h"
 #include "ros2_roamadome/roamadome_serial_port.hpp"
+#include "ros2_roamadome/roamadome_config_parser.hpp"
 #include "hardware_interface/actuator_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
@@ -12,12 +14,14 @@
 #include <cctype>
 #include <chrono>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <string>
 
 using hardware_interface::return_type;
@@ -161,7 +165,9 @@ private:
   bool retryCurrentStartupCommand(StartupContext * context);
   bool runStartupStateMachine(uint32_t report_ms);
   void handleStartupUnhandledLine(const std::string & line);
+  void handleSendQueueFeedback(const std::string & line);
   void logStartupTransition(const std::string & message);
+  void enqueueConfigDumpWithInvalidLocked(const std::string & reason);
 
   // Helper methods for command handling
   uint32_t normalizeAngleDegrees(double radians) const;
@@ -170,6 +176,12 @@ private:
   bool sendPositionCommand(uint32_t degrees);
   bool sendVelocityCommand(int32_t percentage);
   bool sendStopCommand();
+
+  // Parameter management methods
+  void declareDeviceParameters();
+  void updateParametersFromDevice();
+  rcl_interfaces::msg::SetParametersResult onParameterChange(
+    const std::vector<rclcpp::Parameter> & parameters);
 
   // Logging and hardware connection
   rclcpp::Logger logger_;
@@ -219,6 +231,49 @@ private:
   // Joint naming - read from URDF during initialization
   std::string joint_name_;
 
+  // Device configuration structure
+
+  struct SendQueueCommand
+  {
+    enum class Flow
+    {
+      ONE_SHOT,
+      PARAMETER_UPDATE_ACK
+    };
+
+    std::string label;
+    std::string command;
+    Flow flow = Flow::ONE_SHOT;
+    bool post_ack_config_dump = false;
+  };
+
+  enum class SendQueueStage
+  {
+    IDLE,
+    WAIT_WRITE_SETTINGS,
+    WAIT_UPDATED
+  };
+
+  // Device configuration storage
+  DeviceConfiguration deviceConfig_;
+  mutable std::mutex config_mutex_;
+
+  // Command send queue
+  std::queue<SendQueueCommand> sendQueue_;
+  mutable std::mutex sendQueue_mutex_;
+  bool sendQueueCommandActive_ = false;
+  SendQueueCommand activeSendQueueCommand_;
+  SendQueueStage sendQueueStage_ = SendQueueStage::IDLE;
+  std::chrono::steady_clock::time_point sendQueueStageStartTime_;
+  uint32_t sendQueueAckTimeoutMs_ = 3000;
+  std::atomic<bool> parameterSyncInProgress_{false};
+  uint32_t configRefreshIntervalMs_ = 60000;  // Default 60 seconds
+  rclcpp::TimerBase::SharedPtr periodicConfigTimer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr paramCallbackHandle_;
+
+  // Setup service
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr setupService_;
+
   // Inner class: Observer for serial port events
   class SerialEventHandler : public ISerialObserver
   {
@@ -246,15 +301,36 @@ public:
 
     void onUnhandledLine(const std::string & line) override
     {
+      controller_->handleSendQueueFeedback(line);
       controller_->handleStartupUnhandledLine(line);
       RCLCPP_DEBUG(controller_->logger_, "Unhandled serial line: %s", line.c_str());
     }
 
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
-      std::lock_guard<std::mutex> lock(controller_->startupContext_mutex_);
-      controller_->startupContext_.config_map = config;
-      controller_->startupContext_.config_timestamp = std::chrono::steady_clock::now();
+      // Parse the configuration using ConfigurationParser
+      auto parsed_config = ConfigurationParser::parse(config, controller_->logger_);
+
+      if (parsed_config) {
+        // Store parsed configuration
+        {
+          std::lock_guard<std::mutex> lock(controller_->config_mutex_);
+          controller_->deviceConfig_ = *parsed_config;
+        }
+        RCLCPP_DEBUG(controller_->logger_, "Device configuration parsed and stored");
+
+        // Update ROS2 parameters from device config
+        controller_->updateParametersFromDevice();
+      } else {
+        RCLCPP_WARN(controller_->logger_, "Failed to parse device configuration");
+      }
+
+      // Also update startup context for startup state machine
+      {
+        std::lock_guard<std::mutex> lock(controller_->startupContext_mutex_);
+        controller_->startupContext_.config_map = config;
+        controller_->startupContext_.config_timestamp = std::chrono::steady_clock::now();
+      }
 
       RCLCPP_INFO(controller_->logger_, "Config received:");
       for (const auto & [key, value] : config) {
