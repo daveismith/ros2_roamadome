@@ -169,6 +169,67 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 - `startup_log_level=debug`: Startup transition logs only appear when running with `--ros-args --log-level debug`
 - `startup_log_level=info`: Startup transition logs always appear at default log level
 
+### Runtime ROS Parameters (device.*)
+
+After `on_configure()`, the hardware interface declares a `device.*` parameter set and keeps it synchronized
+with controller configuration snapshots from the serial device.
+
+Writable parameters (ROS -> device):
+
+| Parameter | Type | Valid Range | Device Command |
+|-----------|------|-------------|----------------|
+| `device.auto_mode` | bool | `true/false` | `#DPAUTO0/1` |
+| `device.home_mode` | bool | `true/false` | `#DPHOME0/1` |
+| `device.auto_left` | int | `0..180` | `#DPAUTOLEFT<n>` |
+| `device.auto_right` | int | `0..180` | `#DPAUTORIGHT<n>` |
+| `device.auto_min_delay` | int | `0..255` | `#DPAUTOMIN<n>` |
+| `device.auto_max_delay` | int | `0..255` | `#DPAUTOMAX<n>` |
+| `device.speed_auto` | int | `0..100` | `#DPAUTOSPEED<n>` |
+| `device.fudge` | int | `0..20` | `#DPFUDGE<n>` |
+
+Read-only parameters (device -> ROS):
+
+- `device.home_pos`
+- `device.max_speed`
+- `device.min_speed`
+- `device.input_speed`
+- `device.scaling`
+- `device.inverted`
+- `device.timeout`
+- `device.auto_safety`
+- `device.auto_restart`
+- `device.acceleration_scale`
+- `device.deceleration_scale`
+- `device.home_min_delay`
+- `device.home_max_delay`
+- `device.target_min_delay`
+- `device.target_max_delay`
+- `device.setup_angular_velocity`
+- `device.speed_home`
+- `device.speed_target`
+
+Parameter update behavior:
+
+- Writable changes are validated in the parameter callback before queueing serial commands.
+- Ack-tracked updates wait for `Write Settings` then `Updated` feedback from firmware.
+- After update ack, a config refresh (`#DPCONFIG` + `#DPINVALID`) is queued to synchronize all `device.*` values.
+- Device-to-ROS synchronization uses a guard (`parameterSyncInProgress_`) to avoid callback loops.
+
+Examples:
+
+```bash
+# Toggle auto mode at runtime
+ros2 param set /roamadome device.auto_mode true
+
+# Update auto sweep limits
+ros2 param set /roamadome device.auto_left 90
+ros2 param set /roamadome device.auto_right 90
+
+# Read back synchronized values
+ros2 param get /roamadome device.auto_mode
+ros2 param get /roamadome device.home_pos
+```
+
 ### Startup Configure Sequence
 
 During `on_configure()`, the hardware interface performs a deterministic startup sequence to ensure the device is properly configured:
@@ -258,6 +319,46 @@ Each wait state performs serial reads in a loop with configurable timeouts:
 - `#DPSETUP` output may include `GOOD MAX SPEED: <n>` from the firmware; this value is currently treated as informational and is not parsed or stored by the ROS2 interface
 - Transitions are data-driven from a startup command table with conditional branching via lambda functions
 - Configuration data includes a timestamp to detect stale data (warns if older than `startup_config_stale_warning_ms`, default 30 seconds)
+
+## Integration Testing And Validation
+
+Use this sequence for full validation on a real robot or test bench:
+
+1. Build and run package tests:
+
+```bash
+cd ~/r2_ws
+source setup.bash
+colcon build --packages-select ros2_roamadome --symlink-install
+colcon test --packages-select ros2_roamadome --event-handlers console_direct+
+```
+
+2. Launch hardware stack and verify startup:
+
+```bash
+source setup.bash
+ros2 launch r2_bringup launch_robot.launch.py
+```
+
+3. Trigger setup service and verify success:
+
+```bash
+ros2 service call /roamadome/setup std_srvs/srv/Trigger
+```
+
+4. Validate parameter sync path end-to-end:
+
+```bash
+ros2 param set /roamadome device.auto_mode false
+ros2 param get /roamadome device.auto_mode
+```
+
+5. Check logs for expected ack and sync flow:
+
+- `Queued parameter update: device.*`
+- `Received 'Write Settings'`
+- `Received 'Updated'`
+- `Device->ROS parameter sync complete`
 
 ### Command Terminators
 

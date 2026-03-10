@@ -92,6 +92,14 @@ if(BUILD_TESTING)
     $<INSTALL_INTERFACE:include>
   )
   target_link_libraries(test_roamadome_control ros2_roamadome)
+
+  # Unit tests for DeviceParameterSpecs
+  ament_add_gtest(test_device_parameter_specs test/test_device_parameter_specs.cpp)
+  target_include_directories(test_device_parameter_specs PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_device_parameter_specs ros2_roamadome)
 endif()
 
 ament_export_include_directories(
