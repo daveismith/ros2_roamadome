@@ -11,94 +11,96 @@ std::vector<std::unique_ptr<DeviceParameterSpecBase>> buildParameterSpecs()
   std::vector<std::unique_ptr<DeviceParameterSpecBase>> specs;
 
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint16_t>>(
-      "home_pos", 0, "Home position", "HomePos", 0, 359));
+      "home_pos", "HomePos", "Home position", 0, 0, 359));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "max_speed", 50, "Maximum speed", "MaxSpeed", 0, 100));
+      "max_speed", "MaxSpeed", "Maximum speed", 50, 0, 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "min_speed", 15, "Minimum speed", "MinSpeed", 0, 100));
+      "min_speed", "MinSpeed", "Minimum speed", 15, 0, 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "input_speed", 100, "Input speed", "InputSpeed", 0, 100));
+      "input_speed", "InputSpeed", "Input speed", 100, 0, 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "scaling", false, "Scaling mode", "Scaling"));
+      "scaling", "Scaling", "Scaling mode", false));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "inverted", true, "Inverted mode", "Inverted"));
+      "inverted", "Inverted", "Inverted mode", true));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "timeout", 5, "Timeout", "Timeout", 0, 30));
+      "timeout", "Timeout", "Timeout", 5, 0, 30));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "auto_safety", false, "Auto safety", "AutoSafety"));
+      "auto_safety", "AutoSafety", "Auto safety", false));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "auto_restart", true, "Auto restart", "AutoRestart"));
+      "auto_restart", "AutoRestart", "Auto restart", true));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "acceleration_scale", 20, "Acceleration scale", "AccelerationScale"));
+      "acceleration_scale", "AccelerationScale", "Acceleration scale", 20));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "deceleration_scale", 50, "Deceleration scale", "DecelerationScale"));
+      "deceleration_scale", "DecelerationScale", "Deceleration scale", 50));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "home_min_delay", 6, "Home minimum delay", "HomeMinDelay"));
+      "home_min_delay", "HomeMinDelay", "Home minimum delay", 6));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "home_max_delay", 8, "Home maximum delay", "HomeMaxDelay"));
+      "home_max_delay", "HomeMaxDelay", "Home maximum delay", 8));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "target_min_delay", 0, "Target minimum delay", "TargetMinDelay"));
+      "target_min_delay", "TargetMinDelay", "Target minimum delay", 0));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "target_max_delay", 1, "Target maximum delay", "TargetMaxDelay"));
+      "target_max_delay", "TargetMaxDelay", "Target maximum delay", 1));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint16_t>>(
-      "setup_angular_velocity", 100, "Setup angular velocity", "SetupAngularVelocity"));
+      "setup_angular_velocity", "SetupAngularVelocity", "Setup angular velocity", 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "speed_home", 40, "Home speed", "SpeedHome", 0, 100));
+      "speed_home", "SpeedHome", "Home speed", 40, 0, 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "speed_target", 100, "Target speed", "SpeedTarget", 0, 100));
+      "speed_target", "SpeedTarget", "Target speed", 100, 0, 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "syren_address_in", 129, "Syren input address", "SyrenAddressIn"));
+      "syren_address_in", "SyrenAddressIn", "Syren input address", 129));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "syren_address_out", 129, "Syren output address", "SyrenAddressOut"));
+      "syren_address_out", "SyrenAddressOut", "Syren output address", 129));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint32_t>>(
-      "sensor_baud", 115200, "Sensor baud rate", "SensorBaud"));
+      "sensor_baud", "SensorBaud", "Sensor baud rate", 115200));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint32_t>>(
-      "syren_baud", 9600, "Syren baud rate", "SyrenBaud"));
+      "syren_baud", "SyrenBaud", "Syren baud rate", 9600));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint32_t>>(
-      "serial_baud", 9600, "Controller serial baud rate", "SerialBaud"));
+      "serial_baud", "SerialBaud", "Controller serial baud rate", 9600));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "serial_in", true, "Serial input enabled", "SerialIn"));
+      "serial_in", "SerialIn", "Serial input enabled", true));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "serial_out", true, "Serial output enabled", "SerialOut"));
+      "serial_out", "SerialOut", "Serial output enabled", true));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "pwm_in", false, "PWM input enabled", "PWMIn"));
+      "pwm_in", "PWMIn", "PWM input enabled", false));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "pwm_out", false, "PWM output enabled", "PWMOut"));
+      "pwm_out", "PWMOut", "PWM output enabled", false));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint16_t>>(
-      "pwm_min_pulse", 1000, "PWM minimum pulse width", "PWMMinPulse"));
+      "pwm_min_pulse", "PWMMinPulse", "PWM minimum pulse width", 1000));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint16_t>>(
-      "pwm_max_pulse", 2000, "PWM maximum pulse width", "PWMMaxPulse"));
+      "pwm_max_pulse", "PWMMaxPulse", "PWM maximum pulse width", 2000));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint16_t>>(
-      "pwm_neutral_pulse", 1500, "PWM neutral pulse width", "PWMNeutralPulse"));
+      "pwm_neutral_pulse", "PWMNeutralPulse", "PWM neutral pulse width", 1500));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "pwm_deadband", 5, "PWM deadband", "PWMDeadband"));
+      "pwm_deadband", "PWMDeadband", "PWM deadband", 5));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "pwm_arc_mode", false, "PWM arc mode enabled", "PWMArcMode"));
+      "pwm_arc_mode", "PWMArcMode", "PWM arc mode enabled", false));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "digital_out", 0, "Digital output", "DOut"));
+      "digital_out", "DOut", "Digital output", 0));
 
   specs.emplace_back(std::make_unique<WritableParameterSpec<bool>>(
-      "auto_mode", false, "Enable/disable automatic dome movement mode", "#DPAUTO",
-      "AutoMode", false, true, getBoolTypeLambda<bool>()));
+      "auto_mode", "AutoMode", "Enable/disable automatic dome movement mode", "#DPAUTO",
+      false, false, true, getBoolTypeLambda<bool>()));
   specs.emplace_back(std::make_unique<WritableParameterSpec<bool>>(
-      "home_mode", false, "Enable/disable home mode", "#DPHOME", "HomeMode", false, true,
-      getBoolTypeLambda<bool>()));
+      "home_mode", "HomeMode", "Enable/disable home mode", "#DPHOME",
+      false, false, true, getBoolTypeLambda<bool>()));
   specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
-      "auto_left", 80, "Maximum distance to auto left (0-180 degrees)", "#DPAUTOLEFT",
-      "AutoLeft", 0, 180));
+      "auto_left", "AutoLeft", "Maximum distance to auto left (0-180 degrees)",
+      "#DPAUTOLEFT", 80, 0, 180));
   specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
-      "auto_right", 80, "Maximum distance to auto right (0-180 degrees)", "#DPAUTORIGHT",
-      "AutoRight", 0, 180));
+      "auto_right", "AutoRight", "Maximum distance to auto right (0-180 degrees)",
+      "#DPAUTORIGHT", 80, 0, 180));
   specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
-      "auto_min_delay", 6, "Minimum delay for auto mode (seconds)", "#DPAUTOMIN",
-      "AutoMinDelay", 0, 255));
+      "auto_min_delay", "AutoMinDelay", "Minimum delay for auto mode (seconds)",
+      "#DPAUTOMIN", 6, 0, 255));
   specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
-      "auto_max_delay", 8, "Maximum delay for auto mode (seconds)", "#DPAUTOMAX",
-      "AutoMaxDelay", 0, 255));
+      "auto_max_delay", "AutoMaxDelay", "Maximum delay for auto mode (seconds)",
+      "#DPAUTOMAX", 8, 0, 255));
   specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
-      "speed_auto", 30, "Speed for auto mode (0-100)", "#DPAUTOSPEED", "SpeedAuto", 0, 100));
+      "speed_auto", "SpeedAuto", "Speed for auto mode (0-100)", "#DPAUTOSPEED",
+      30, 0, 100));
   specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
-      "fudge", 5, "Target position tolerance (0-20 degrees)", "#DPFUDGE", "Fudge", 0, 20));
+      "fudge", "Fudge", "Target position tolerance (0-20 degrees)", "#DPFUDGE",
+      5, 0, 20));
 
   return specs;
 }
@@ -113,9 +115,9 @@ DeviceParameterRegistry & getMetadataRegistry()
 
 DeviceParameterSpecBase::DeviceParameterSpecBase(
   std::string full_name,
-  rclcpp::ParameterValue default_value,
+  std::string firmware_config_key,
   std::string description,
-  std::string firmware_config_key)
+  rclcpp::ParameterValue default_value)
 : full_name_(std::move(full_name)),
   default_value_(std::move(default_value)),
   description_(std::move(description)),
@@ -143,23 +145,18 @@ const std::string & DeviceParameterSpecBase::firmwareConfigKey() const
   return firmware_config_key_;
 }
 
-bool DeviceParameterSpecBase::hasFirmwareConfigKey() const
-{
-  return !firmware_config_key_.empty();
-}
-
 WritableParameterSpecBase::WritableParameterSpecBase(
   std::string field_name,
   std::string full_name,
-  rclcpp::ParameterValue default_value,
+  std::string firmware_config_key,
   std::string description,
   std::string command_prefix,
-  std::string firmware_config_key)
+  rclcpp::ParameterValue default_value)
 : DeviceParameterSpecBase(
     std::move(full_name),
-    std::move(default_value),
+    std::move(firmware_config_key),
     std::move(description),
-    std::move(firmware_config_key)),
+    std::move(default_value)),
   field_name_(std::move(field_name)),
   command_prefix_(std::move(command_prefix))
 {
@@ -186,9 +183,7 @@ DeviceParameterRegistry::DeviceParameterRegistry()
   all_specs_.reserve(specs_.size());
   for (const auto & spec : specs_) {
     all_specs_.push_back(spec.get());
-    if (spec->hasFirmwareConfigKey()) {
-      specs_by_config_key_.emplace(spec->firmwareConfigKey(), spec.get());
-    }
+    specs_by_config_key_.emplace(spec->firmwareConfigKey(), spec.get());
     if (spec->isWritable()) {
       const auto * writable = dynamic_cast<const WritableParameterSpecBase *>(spec.get());
       if (nullptr != writable) {

@@ -34,14 +34,13 @@ public:
   const std::string & description() const;
   const rclcpp::ParameterValue & defaultValue() const;
   const std::string & firmwareConfigKey() const;
-  bool hasFirmwareConfigKey() const;
 
 protected:
   DeviceParameterSpecBase(
     std::string full_name,
-    rclcpp::ParameterValue default_value,
+    std::string firmware_config_key,
     std::string description,
-    std::string firmware_config_key = "");
+    rclcpp::ParameterValue default_value);
 
 private:
   std::string full_name_;
@@ -56,10 +55,10 @@ public:
   WritableParameterSpecBase(
     std::string field_name,
     std::string full_name,
-    rclcpp::ParameterValue default_value,
+    std::string firmware_config_key,
     std::string description,
     std::string command_prefix,
-    std::string firmware_config_key = "");
+    rclcpp::ParameterValue default_value);
 
   bool isWritable() const override;
   const std::string & fieldName() const;
@@ -86,16 +85,16 @@ public:
 
   ReadOnlyParameterSpec(
     std::string field_name,
-    TValue default_value,
-    std::string description,
     std::string firmware_config_key,
+    std::string description,
+    TValue default_value,
     TValue min_value = std::numeric_limits<TValue>::lowest(),
     TValue max_value = std::numeric_limits<TValue>::max())
   : DeviceParameterSpecBase(
       buildFullName(field_name),
-      toParameterValue(default_value),
+      std::move(firmware_config_key),
       std::move(description),
-      std::move(firmware_config_key)),
+      toParameterValue(default_value)),
     current_value_(default_value),
     default_value_typed_(default_value),
     min_value_(min_value),
@@ -142,20 +141,20 @@ public:
 
   WritableParameterSpec(
     std::string field_name,
-    TValue default_value,
+    std::string firmware_config_key,
     std::string description,
     std::string command_prefix,
-    std::string firmware_config_key,
+    TValue default_value,
     TValue min_value = std::numeric_limits<TValue>::lowest(),
     TValue max_value = std::numeric_limits<TValue>::max(),
     ParameterValidator validator = nullptr)
   : WritableParameterSpecBase(
       field_name,
       buildFullName(field_name),
-      toParameterValue(default_value),
+      std::move(firmware_config_key),
       std::move(description),
       std::move(command_prefix),
-      std::move(firmware_config_key)),
+      toParameterValue(default_value)),
     current_value_(default_value),
     default_value_typed_(default_value),
     min_value_(min_value),

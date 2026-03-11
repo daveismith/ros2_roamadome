@@ -184,6 +184,15 @@ The same per-field definitions now drive:
 
 This keeps field names, ranges, and type expectations in one place when adding or changing parameters.
 
+When adding or modifying spec definitions in `device_parameter_specs.cpp`, use this constructor order:
+
+- `ReadOnlyParameterSpec`: `field_name`, `firmware_config_key`, `description`, `default_value`,
+  `min_value`, `max_value`
+- `WritableParameterSpec`: `field_name`, `firmware_config_key`, `description`, `command_prefix`,
+  `default_value`, `min_value`, `max_value`
+
+`firmware_config_key` is required for all specs and is used for `#DPCONFIG` key mapping.
+
 Writable parameters (ROS -> device):
 
 | Parameter | Type | Valid Range | Device Command |
