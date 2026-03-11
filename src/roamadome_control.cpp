@@ -1221,6 +1221,9 @@ void RoamadomeControl::updateParametersFromDevice()
   // Update all parameters from device config
   std::vector<rclcpp::Parameter> params_to_set;
   for (const auto * spec : getAllParameterSpecs()) {
+    if (!spec->isWritable()) {
+      continue;  // Skip read-only parameters for device->ROS sync
+    }
     params_to_set.push_back(spec->toParameter(deviceConfig_));
   }
 

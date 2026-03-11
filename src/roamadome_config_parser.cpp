@@ -19,7 +19,8 @@ bool ConfigurationParser::parseUInt8(
     // Parse as unsigned long then validate range
     unsigned long parsed = std::stoul(value_str);
     if (parsed < min_val || parsed > max_val) {
-      RCLCPP_WARN(logger, "Value %lu out of range [%" PRIu8 ", %" PRIu8 "]", parsed, (uint8_t)min_val, (uint8_t)max_val);
+      RCLCPP_WARN(logger, "Value %lu out of range [%" PRIu8 ", %" PRIu8 "]", parsed,
+        (uint8_t)min_val, (uint8_t)max_val);
       return false;
     }
     output = static_cast<uint8_t>(parsed);
@@ -40,7 +41,8 @@ bool ConfigurationParser::parseUInt16(
   try {
     unsigned long parsed = std::stoul(value_str);
     if (parsed < min_val || parsed > max_val) {
-      RCLCPP_WARN(logger, "Value %lu out of range [%" PRIu16 ", %" PRIu16 "]", parsed, (uint16_t)min_val, (uint16_t)max_val);
+      RCLCPP_WARN(logger, "Value %lu out of range [%" PRIu16 ", %" PRIu16 "]", parsed,
+        (uint16_t)min_val, (uint16_t)max_val);
       return false;
     }
     output = static_cast<uint16_t>(parsed);
