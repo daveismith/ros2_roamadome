@@ -11,7 +11,7 @@ namespace ros2_roamadome
 TEST(DeviceParameterSpecsTest, GetAllParameterSpecs_ContainsExpectedCounts)
 {
   const auto & specs = getAllParameterSpecs();
-  EXPECT_EQ(specs.size(), 26U);
+  EXPECT_EQ(specs.size(), 41U);
 
   size_t writable_count = 0;
   for (const auto * spec : specs) {
@@ -21,6 +21,58 @@ TEST(DeviceParameterSpecsTest, GetAllParameterSpecs_ContainsExpectedCounts)
   }
 
   EXPECT_EQ(writable_count, 8U);
+}
+
+TEST(DeviceParameterSpecsTest, DeviceConfigurationFields_HaveConfigKeyMappings)
+{
+  const std::vector<std::string> required_config_keys = {
+    "HomePos",
+    "MaxSpeed",
+    "MinSpeed",
+    "AutoMode",
+    "HomeMode",
+    "InputSpeed",
+    "Scaling",
+    "Inverted",
+    "Timeout",
+    "AutoSafety",
+    "AutoRestart",
+    "AccelerationScale",
+    "DecelerationScale",
+    "HomeMinDelay",
+    "HomeMaxDelay",
+    "AutoMinDelay",
+    "AutoMaxDelay",
+    "TargetMinDelay",
+    "TargetMaxDelay",
+    "SetupAngularVelocity",
+    "AutoLeft",
+    "AutoRight",
+    "Fudge",
+    "SpeedHome",
+    "SpeedAuto",
+    "SpeedTarget",
+    "SyrenAddressIn",
+    "SyrenAddressOut",
+    "SensorBaud",
+    "SyrenBaud",
+    "SerialBaud",
+    "SerialIn",
+    "SerialOut",
+    "PWMIn",
+    "PWMOut",
+    "PWMMinPulse",
+    "PWMMaxPulse",
+    "PWMNeutralPulse",
+    "PWMDeadband",
+    "PWMArcMode",
+    "DOut"
+  };
+
+  for (const auto & config_key : required_config_keys) {
+    const auto * spec = findParameterSpecByConfigKey(config_key);
+    ASSERT_NE(spec, nullptr) << "Missing spec for config key: " << config_key;
+  }
 }
 
 TEST(DeviceParameterSpecsTest, FindWritableParameterSpec_DetectsWritableAndReadOnly)

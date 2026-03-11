@@ -121,6 +121,51 @@ const std::vector<const DeviceParameterSpecBase *> & getAllParameterSpecs()
       static const ReadOnlyParameterSpec<uint8_t> kDeviceSpeedTarget(
         "speed_target", 100, "Target speed", &DeviceConfiguration::speed_target, "SpeedTarget",
         0, 100);
+      static const ReadOnlyParameterSpec<uint8_t> kDeviceSyrenAddressIn(
+        "syren_address_in", 129, "Syren input address", &DeviceConfiguration::syren_address_in,
+        "SyrenAddressIn");
+      static const ReadOnlyParameterSpec<uint8_t> kDeviceSyrenAddressOut(
+        "syren_address_out", 129, "Syren output address",
+        &DeviceConfiguration::syren_address_out, "SyrenAddressOut");
+      static const ReadOnlyParameterSpec<uint32_t> kDeviceSensorBaud(
+        "sensor_baud", 115200, "Sensor baud rate", &DeviceConfiguration::sensor_baud,
+        "SensorBaud");
+      static const ReadOnlyParameterSpec<uint32_t> kDeviceSyrenBaud(
+        "syren_baud", 9600, "Syren baud rate", &DeviceConfiguration::syren_baud,
+        "SyrenBaud");
+      static const ReadOnlyParameterSpec<uint32_t> kDeviceSerialBaud(
+        "serial_baud", 9600, "Controller serial baud rate", &DeviceConfiguration::serial_baud,
+        "SerialBaud");
+      static const ReadOnlyParameterSpec<bool> kDeviceSerialIn(
+        "serial_in", true, "Serial input enabled", &DeviceConfiguration::serial_in,
+        "SerialIn");
+      static const ReadOnlyParameterSpec<bool> kDeviceSerialOut(
+        "serial_out", true, "Serial output enabled", &DeviceConfiguration::serial_out,
+        "SerialOut");
+      static const ReadOnlyParameterSpec<bool> kDevicePwmIn(
+        "pwm_in", false, "PWM input enabled", &DeviceConfiguration::pwm_in,
+        "PWMIn");
+      static const ReadOnlyParameterSpec<bool> kDevicePwmOut(
+        "pwm_out", false, "PWM output enabled", &DeviceConfiguration::pwm_out,
+        "PWMOut");
+      static const ReadOnlyParameterSpec<uint16_t> kDevicePwmMinPulse(
+        "pwm_min_pulse", 1000, "PWM minimum pulse width",
+        &DeviceConfiguration::pwm_min_pulse, "PWMMinPulse");
+      static const ReadOnlyParameterSpec<uint16_t> kDevicePwmMaxPulse(
+        "pwm_max_pulse", 2000, "PWM maximum pulse width",
+        &DeviceConfiguration::pwm_max_pulse, "PWMMaxPulse");
+      static const ReadOnlyParameterSpec<uint16_t> kDevicePwmNeutralPulse(
+        "pwm_neutral_pulse", 1500, "PWM neutral pulse width",
+        &DeviceConfiguration::pwm_neutral_pulse, "PWMNeutralPulse");
+      static const ReadOnlyParameterSpec<uint8_t> kDevicePwmDeadband(
+        "pwm_deadband", 5, "PWM deadband", &DeviceConfiguration::pwm_deadband,
+        "PWMDeadband");
+      static const ReadOnlyParameterSpec<bool> kDevicePwmArcMode(
+        "pwm_arc_mode", false, "PWM arc mode enabled", &DeviceConfiguration::pwm_arc_mode,
+        "PWMArcMode");
+      static const ReadOnlyParameterSpec<uint8_t> kDeviceDigitalOut(
+        "digital_out", 0, "Digital output", &DeviceConfiguration::digital_out,
+        "DOut");
 
     // Writable specs
       static const WritableParameterSpec<bool> kDeviceAutoMode(
@@ -167,6 +212,21 @@ const std::vector<const DeviceParameterSpecBase *> & getAllParameterSpecs()
       &kDeviceSetupAngularVelocity,
       &kDeviceSpeedHome,
       &kDeviceSpeedTarget,
+      &kDeviceSyrenAddressIn,
+      &kDeviceSyrenAddressOut,
+      &kDeviceSensorBaud,
+      &kDeviceSyrenBaud,
+      &kDeviceSerialBaud,
+      &kDeviceSerialIn,
+      &kDeviceSerialOut,
+      &kDevicePwmIn,
+      &kDevicePwmOut,
+      &kDevicePwmMinPulse,
+      &kDevicePwmMaxPulse,
+      &kDevicePwmNeutralPulse,
+      &kDevicePwmDeadband,
+      &kDevicePwmArcMode,
+      &kDeviceDigitalOut,
       &kDeviceAutoMode,
       &kDeviceHomeMode,
       &kDeviceAutoLeft,

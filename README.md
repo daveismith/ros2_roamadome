@@ -196,7 +196,7 @@ Writable parameters (ROS -> device):
 | `device.speed_auto` | int | `0..100` | `#DPAUTOSPEED<n>` |
 | `device.fudge` | int | `0..20` | `#DPFUDGE<n>` |
 
-Read-only parameters (device -> ROS):
+Read-only parameters (from config snapshot parsing):
 
 - `device.home_pos`
 - `device.max_speed`
@@ -216,6 +216,21 @@ Read-only parameters (device -> ROS):
 - `device.setup_angular_velocity`
 - `device.speed_home`
 - `device.speed_target`
+- `device.syren_address_in`
+- `device.syren_address_out`
+- `device.sensor_baud`
+- `device.syren_baud`
+- `device.serial_baud`
+- `device.serial_in`
+- `device.serial_out`
+- `device.pwm_in`
+- `device.pwm_out`
+- `device.pwm_min_pulse`
+- `device.pwm_max_pulse`
+- `device.pwm_neutral_pulse`
+- `device.pwm_deadband`
+- `device.pwm_arc_mode`
+- `device.digital_out`
 
 Parameter update behavior:
 
