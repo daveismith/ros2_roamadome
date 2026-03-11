@@ -312,7 +312,7 @@ template<typename TValue>
 void ReadOnlyParameterSpec<TValue>::declareParameter(const rclcpp::Node::SharedPtr & node) const
 {
   rcl_interfaces::msg::ParameterDescriptor descriptor;
-  descriptor.read_only = false;
+  descriptor.read_only = true;
   descriptor.description = description();
   node->declare_parameter(fullName(), defaultValue(), descriptor);
 }

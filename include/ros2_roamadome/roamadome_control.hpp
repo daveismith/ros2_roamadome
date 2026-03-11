@@ -32,6 +32,8 @@ namespace ros2_roamadome
 class RoamadomeControl : public hardware_interface::ActuatorInterface
 {
 public:
+  friend class RoamadomeControlTest;
+
   RoamadomeControl();
   virtual ~RoamadomeControl();
 
@@ -325,16 +327,10 @@ public:
         controller_->startupContext_.config_map = config;
         controller_->startupContext_.config_timestamp = std::chrono::steady_clock::now();
       }
-
-      RCLCPP_INFO(controller_->logger_, "Config received:");
-      for (const auto & [key, value] : config) {
-        RCLCPP_INFO(controller_->logger_, "  %s = %s", key.c_str(), value.c_str());
-      }
     }
 
     void onStatusUpdate(const std::vector<std::string> & status) override
     {
-      RCLCPP_INFO(controller_->logger_, "Status received:");
       for (const auto & line : status) {
         std::string lowered_line = line;
         std::transform(lowered_line.begin(), lowered_line.end(), lowered_line.begin(),
@@ -344,7 +340,6 @@ public:
         } else if (lowered_line.find("auto safety disengaged") != std::string::npos) {
           controller_->startupContext_.auto_safety_engaged = false;
         }
-        RCLCPP_INFO(controller_->logger_, "  %s", line.c_str());
       }
     }
 

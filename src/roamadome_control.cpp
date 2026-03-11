@@ -343,38 +343,6 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  auto node = get_node();
-  if (node) {
-    paramCallbackHandle_ = node->add_on_set_parameters_callback(
-      std::bind(&RoamadomeControl::onParameterChange, this, std::placeholders::_1));
-
-    // Create setup service
-    setupService_ = node->create_service<std_srvs::srv::Trigger>(
-      "~/setup",
-      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>/* request */,
-      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-        if (!serialHandler_ || !serialHandler_->isOpen()) {
-          response->success = false;
-          response->message = "hardware interface is not active; command not queued";
-          RCLCPP_WARN(logger_, "Setup service called while hardware is inactive; ignoring");
-          return;
-        }
-        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
-        sendQueue_.push({"setup", "#DPSETUP", RoamadomeControl::SendQueueCommand::Flow::ONE_SHOT,
-          false});
-        response->success = true;
-        response->message = "Setup command queued";
-        RCLCPP_INFO(logger_, "Setup service called, #DPSETUP will be sent in next write cycle");
-      });
-
-    periodicConfigTimer_ = node->create_wall_timer(
-      std::chrono::milliseconds(configRefreshIntervalMs_),
-      [this]() {
-        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
-        enqueueConfigDumpWithInvalidLocked("periodic refresh");
-      });
-  }
-
   RCLCPP_INFO(logger_, "RoamadomeControl configured successfully");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -898,6 +866,47 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
 {
   RCLCPP_INFO(logger_, "Activating RoamadomeControl from state: %s",
       previous_state.label().c_str());
+
+  auto node = get_node();
+  if (!node) {
+    RCLCPP_ERROR(logger_, "Cannot activate RoamadomeControl: lifecycle node is null");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!paramCallbackHandle_) {
+    paramCallbackHandle_ = node->add_on_set_parameters_callback(
+      std::bind(&RoamadomeControl::onParameterChange, this, std::placeholders::_1));
+  }
+
+  if (!setupService_) {
+    setupService_ = node->create_service<std_srvs::srv::Trigger>(
+      "~/setup",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>/* request */,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        if (!serialHandler_ || !serialHandler_->isOpen()) {
+          response->success = false;
+          response->message = "hardware interface is unavailable; command not queued";
+          RCLCPP_WARN(logger_, "Setup service called while serial interface is unavailable");
+          return;
+        }
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+        sendQueue_.push({"setup", "#DPSETUP", RoamadomeControl::SendQueueCommand::Flow::ONE_SHOT,
+          false});
+        response->success = true;
+        response->message = "Setup command queued";
+        RCLCPP_INFO(logger_, "Setup service called, #DPSETUP will be sent in next write cycle");
+      });
+  }
+
+  if (!periodicConfigTimer_) {
+    periodicConfigTimer_ = node->create_wall_timer(
+      std::chrono::milliseconds(configRefreshIntervalMs_),
+      [this]() {
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+        enqueueConfigDumpWithInvalidLocked("periodic refresh");
+      });
+  }
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -910,6 +919,9 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
 
   RCLCPP_INFO(logger_, "Deactivating RoamadomeControl from state: %s",
       previous_state.label().c_str());
+
+  setupService_.reset();
+  paramCallbackHandle_.reset();
 
   if (periodicConfigTimer_) {
     periodicConfigTimer_->cancel();

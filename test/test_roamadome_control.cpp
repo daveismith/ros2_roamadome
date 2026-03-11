@@ -80,6 +80,12 @@ protected:
     return info;
   }
 
+  rcl_interfaces::msg::SetParametersResult setDeviceParametersForTest(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    return controller_->onParameterChange(parameters);
+  }
+
   std::unique_ptr<RoamadomeControl> controller_;
 };
 
@@ -172,6 +178,30 @@ public:
 private:
   int master_fd_ = -1;
   std::string slave_path_;
+};
+
+class FirmwareThreadGuard
+{
+public:
+  FirmwareThreadGuard(std::atomic<bool> * running, std::thread * worker)
+  : running_(running), worker_(worker)
+  {
+  }
+
+  ~FirmwareThreadGuard()
+  {
+    if (running_) {
+      running_->store(false);
+    }
+
+    if (worker_ && worker_->joinable()) {
+      worker_->join();
+    }
+  }
+
+private:
+  std::atomic<bool> * running_;
+  std::thread * worker_;
 };
 
 /**
@@ -482,6 +512,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_SkipsSetupWhenAutoSafetyNotEn
         }
       }
     });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
 
   rclcpp_lifecycle::State previous_state(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
@@ -579,6 +610,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_RunsSetupWhenAutoSafetyEngage
         }
       }
     });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
 
   rclcpp_lifecycle::State previous_state(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
@@ -1483,6 +1515,129 @@ TEST_F(RoamadomeControlTest, StartupSequence_HomeMode_AlreadyMatches_SkipsSetCom
     }
   }
   EXPECT_FALSE(home_seen);
+}
+
+/**
+ * ============================================================================
+ * RUNTIME SEND-QUEUE ACK FLOW TESTS
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, RuntimeQueue_ParameterUpdateAck_TriggersConfigRefreshAfterUpdated)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        } else if (line.rfind("DP", 0) == 0) {
+          // PTY can occasionally drop the leading '#'; normalize for assertions.
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back("#" + line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state),
+    hardware_interface::CallbackReturn::SUCCESS);
+
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    seen_commands.clear();
+  }
+
+  auto set_result = setDeviceParametersForTest({rclcpp::Parameter("device.auto_mode", true)});
+  ASSERT_TRUE(set_result.successful) << set_result.reason;
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
+
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+
+  auto wait_for_command = [&](const std::string & exact, int timeout_ms) -> bool {
+      const auto start = std::chrono::steady_clock::now();
+      while (true) {
+        {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          for (const auto & cmd : seen_commands) {
+            if (cmd == exact) {
+              return true;
+            }
+          }
+        }
+
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() > timeout_ms) {
+          return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    };
+
+  ASSERT_TRUE(wait_for_command("#DPAUTO1", 500));
+
+  pty.writeText("Write Settings\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    EXPECT_EQ(
+      std::count(seen_commands.begin(), seen_commands.end(), "#DPCONFIG"),
+      0);
+    EXPECT_EQ(
+      std::count(seen_commands.begin(), seen_commands.end(), "#DPINVALID"),
+      0);
+  }
+
+  pty.writeText("Updated\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+
+  ASSERT_TRUE(wait_for_command("#DPCONFIG", 500));
+  ASSERT_TRUE(wait_for_command("#DPINVALID", 500));
+
 }
 
 }  // namespace ros2_roamadome
