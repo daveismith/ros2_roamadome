@@ -4,9 +4,10 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
 
+#include "ros2_roamadome/device_parameter_specs.hpp"
 #include "ros2_roamadome/visibility_control.h"
-#include "ros2_roamadome/roamadome_serial_port.hpp"
 #include "ros2_roamadome/roamadome_config_parser.hpp"
+#include "ros2_roamadome/roamadome_serial_port.hpp"
 #include "hardware_interface/actuator_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
@@ -254,9 +255,8 @@ private:
     WAIT_UPDATED
   };
 
-  // Device configuration storage
-  DeviceConfiguration deviceConfig_;
-  mutable std::mutex config_mutex_;
+  DeviceParameterRegistry deviceParameterRegistry_;
+  mutable std::mutex deviceParameterRegistry_mutex_;
 
   // Command send queue
   std::queue<SendQueueCommand> sendQueue_;
@@ -308,22 +308,17 @@ public:
 
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
-      // Parse the configuration using ConfigurationParser
-      auto parsed_config = ConfigurationParser::parse(config, controller_->logger_);
-
-      if (parsed_config) {
-        // Store parsed configuration
-        {
-          std::lock_guard<std::mutex> lock(controller_->config_mutex_);
-          controller_->deviceConfig_ = *parsed_config;
+      {
+        std::lock_guard<std::mutex> lock(controller_->deviceParameterRegistry_mutex_);
+        const bool parsed_cleanly = ConfigurationParser::parseIntoRegistry(
+          config, &controller_->deviceParameterRegistry_, controller_->logger_);
+        if (!parsed_cleanly) {
+          RCLCPP_WARN(controller_->logger_,
+            "Device configuration parsed with one or more field errors");
         }
-        RCLCPP_DEBUG(controller_->logger_, "Device configuration parsed and stored");
-
-        // Update ROS2 parameters from device config
-        controller_->updateParametersFromDevice();
-      } else {
-        RCLCPP_WARN(controller_->logger_, "Failed to parse device configuration");
       }
+
+      controller_->updateParametersFromDevice();
 
       // Also update startup context for startup state machine
       {

@@ -1202,7 +1202,7 @@ void RoamadomeControl::declareDeviceParameters()
   }
 
   // All device parameters — skip already-declared ones to survive re-configure
-  for (const auto * spec : getAllParameterSpecs()) {
+  for (const auto * spec : deviceParameterRegistry_.allSpecs()) {
     if (!node->has_parameter(spec->fullName())) {
       spec->declareParameter(node);
     }
@@ -1224,15 +1224,10 @@ void RoamadomeControl::updateParametersFromDevice()
     return;
   }
 
-  std::lock_guard<std::mutex> lock(config_mutex_);
-
-  // Update all parameters from device config
   std::vector<rclcpp::Parameter> params_to_set;
-  for (const auto * spec : getAllParameterSpecs()) {
-    if (!spec->isWritable()) {
-      continue;  // Skip read-only parameters for device->ROS sync
-    }
-    params_to_set.push_back(spec->toParameter(deviceConfig_));
+  {
+    std::lock_guard<std::mutex> lock(deviceParameterRegistry_mutex_);
+    params_to_set = deviceParameterRegistry_.currentParameters();
   }
 
   struct SyncGuard
@@ -1288,10 +1283,12 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
 
     // Extract field name
     std::string field_name = name.substr(7);  // Remove "device." prefix
-    const WritableParameterSpecBase * spec = findWritableParameterSpec(field_name);
+    const WritableParameterSpecBase * spec = deviceParameterRegistry_.findWritableParameterSpec(
+      field_name);
     if (nullptr == spec) {
-      RCLCPP_DEBUG(logger_, "Ignoring non-writable device parameter update: %s", name.c_str());
-      continue;
+      result.successful = false;
+      result.reason = "device parameter " + name + " is read-only and updated from device config";
+      return result;
     }
 
     if (!serialHandler_ || !serialHandler_->isOpen()) {

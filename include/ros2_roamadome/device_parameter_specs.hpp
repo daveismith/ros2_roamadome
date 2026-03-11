@@ -2,14 +2,13 @@
 #define ros2_roamadome__DEVICE_PARAMETER_SPECS_HPP_
 
 #include "rclcpp/rclcpp.hpp"
-#include "ros2_roamadome/roamadome_config_parser.hpp"
 
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <limits>
 #include <map>
-#include <optional>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -25,11 +24,11 @@ public:
 
   virtual void declareParameter(const rclcpp::Node::SharedPtr & node) const = 0;
   virtual bool isWritable() const = 0;
-  virtual rclcpp::Parameter toParameter(const DeviceConfiguration & config) const = 0;
-  virtual bool parseAndApplyConfigValue(
+  virtual rclcpp::Parameter currentParameter() const = 0;
+  virtual bool parseAndStoreConfigValue(
     const std::string & value_str,
-    DeviceConfiguration * config,
-    const rclcpp::Logger & logger) const = 0;
+    const rclcpp::Logger & logger) = 0;
+  virtual void resetToDefault() = 0;
 
   const std::string & fullName() const;
   const std::string & description() const;
@@ -85,13 +84,10 @@ public:
   static_assert(std::is_integral<TValue>::value || std::is_same<TValue, bool>::value,
     "ReadOnlyParameterSpec only supports integral and bool types");
 
-  using MemberPointer = TValue DeviceConfiguration::*;
-
   ReadOnlyParameterSpec(
     std::string field_name,
     TValue default_value,
     std::string description,
-    MemberPointer member_ptr,
     std::string firmware_config_key,
     TValue min_value = std::numeric_limits<TValue>::lowest(),
     TValue max_value = std::numeric_limits<TValue>::max())
@@ -100,7 +96,8 @@ public:
       toParameterValue(default_value),
       std::move(description),
       std::move(firmware_config_key)),
-    member_ptr_(member_ptr),
+    current_value_(default_value),
+    default_value_typed_(default_value),
     min_value_(min_value),
     max_value_(max_value)
   {
@@ -108,11 +105,11 @@ public:
 
   void declareParameter(const rclcpp::Node::SharedPtr & node) const override;
   bool isWritable() const override;
-  rclcpp::Parameter toParameter(const DeviceConfiguration & config) const override;
-  bool parseAndApplyConfigValue(
+  rclcpp::Parameter currentParameter() const override;
+  bool parseAndStoreConfigValue(
     const std::string & value_str,
-    DeviceConfiguration * config,
-    const rclcpp::Logger & logger) const override;
+    const rclcpp::Logger & logger) override;
+  void resetToDefault() override;
 
 private:
   static std::string buildFullName(const std::string & field_name)
@@ -128,7 +125,8 @@ private:
     return rclcpp::ParameterValue(static_cast<int64_t>(value));
   }
 
-  MemberPointer member_ptr_;
+  TValue current_value_;
+  TValue default_value_typed_;
   TValue min_value_;
   TValue max_value_;
 };
@@ -140,7 +138,6 @@ public:
   static_assert(std::is_integral<TValue>::value || std::is_same<TValue, bool>::value,
     "WritableParameterSpec only supports integral and bool types");
 
-  using MemberPointer = TValue DeviceConfiguration::*;
   using ParameterValidator = std::function<bool(const rclcpp::Parameter &, std::string *)>;
 
   WritableParameterSpec(
@@ -148,7 +145,6 @@ public:
     TValue default_value,
     std::string description,
     std::string command_prefix,
-    MemberPointer member_ptr,
     std::string firmware_config_key,
     TValue min_value = std::numeric_limits<TValue>::lowest(),
     TValue max_value = std::numeric_limits<TValue>::max(),
@@ -160,7 +156,8 @@ public:
       std::move(description),
       std::move(command_prefix),
       std::move(firmware_config_key)),
-    member_ptr_(member_ptr),
+    current_value_(default_value),
+    default_value_typed_(default_value),
     min_value_(min_value),
     max_value_(max_value),
     validator_(std::move(validator))
@@ -168,11 +165,11 @@ public:
   }
 
   void declareParameter(const rclcpp::Node::SharedPtr & node) const override;
-  rclcpp::Parameter toParameter(const DeviceConfiguration & config) const override;
-  bool parseAndApplyConfigValue(
+  rclcpp::Parameter currentParameter() const override;
+  bool parseAndStoreConfigValue(
     const std::string & value_str,
-    DeviceConfiguration * config,
-    const rclcpp::Logger & logger) const override;
+    const rclcpp::Logger & logger) override;
+  void resetToDefault() override;
   bool validateAndBuildCommand(
     const rclcpp::Parameter & parameter,
     std::string * command,
@@ -201,8 +198,8 @@ private:
       if constexpr (std::is_same<TValue, bool>::value) {
         *output = parameter.as_bool();
       } else {
-        (void) parameter.as_int();
-        *output = TValue{};
+        const int64_t parsed = parameter.as_int();
+        *output = static_cast<TValue>(parsed);
       }
     } catch (const rclcpp::ParameterTypeException & e) {
       *reason = std::string("invalid type for ") + parameter.get_name() + ": " + e.what();
@@ -211,10 +208,35 @@ private:
     return true;
   }
 
-  MemberPointer member_ptr_;
+  TValue current_value_;
+  TValue default_value_typed_;
   TValue min_value_;
   TValue max_value_;
   ParameterValidator validator_;
+};
+
+class DeviceParameterRegistry
+{
+public:
+  DeviceParameterRegistry();
+
+  const std::vector<const DeviceParameterSpecBase *> & allSpecs() const;
+  std::vector<rclcpp::Parameter> currentParameters() const;
+  std::vector<rclcpp::Parameter> currentWritableParameters() const;
+  bool parseConfigMap(
+    const std::map<std::string, std::string> & config_map,
+    const rclcpp::Logger & logger);
+  void resetToDefaults();
+
+  const WritableParameterSpecBase * findWritableParameterSpec(const std::string & field_name) const;
+  const DeviceParameterSpecBase * findParameterSpecByConfigKey(
+    const std::string & config_key) const;
+
+private:
+  std::vector<std::unique_ptr<DeviceParameterSpecBase>> specs_;
+  std::vector<const DeviceParameterSpecBase *> all_specs_;
+  std::map<std::string, const WritableParameterSpecBase *> writable_specs_by_field_name_;
+  std::map<std::string, DeviceParameterSpecBase *> specs_by_config_key_;
 };
 
 template<typename TValue>
@@ -255,35 +277,35 @@ bool parseConfigScalar(
       return true;
     }
     RCLCPP_WARN(logger, "Invalid boolean value for %s: '%s'", field_name.c_str(),
-        value_str.c_str());
+      value_str.c_str());
     return false;
-  } else {
-    try {
-      size_t parse_end = 0;
-      const unsigned long long parsed = std::stoull(value_str, &parse_end);
-      if (parse_end != value_str.size()) {
-        RCLCPP_WARN(
-          logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
-        return false;
-      }
+  }
 
-      if (parsed < static_cast<unsigned long long>(min_value) ||
-        parsed > static_cast<unsigned long long>(max_value))
-      {
-        RCLCPP_WARN(
-          logger, "Value %s out of range [%lld, %lld] for %s", value_str.c_str(),
-          static_cast<long long>(min_value), static_cast<long long>(max_value), field_name.c_str());
-        return false;
-      }
-
-      *output = static_cast<TValue>(parsed);
-      return true;
-    } catch (const std::exception & ex) {
+  try {
+    size_t parse_end = 0;
+    const unsigned long long parsed = std::stoull(value_str, &parse_end);
+    if (parse_end != value_str.size()) {
       RCLCPP_WARN(
-        logger, "Failed to parse numeric value for %s ('%s'): %s", field_name.c_str(),
-        value_str.c_str(), ex.what());
+        logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
       return false;
     }
+
+    if (parsed < static_cast<unsigned long long>(min_value) ||
+      parsed > static_cast<unsigned long long>(max_value))
+    {
+      RCLCPP_WARN(
+        logger, "Value %s out of range [%lld, %lld] for %s", value_str.c_str(),
+        static_cast<long long>(min_value), static_cast<long long>(max_value), field_name.c_str());
+      return false;
+    }
+
+    *output = static_cast<TValue>(parsed);
+    return true;
+  } catch (const std::exception & ex) {
+    RCLCPP_WARN(
+      logger, "Failed to parse numeric value for %s ('%s'): %s", field_name.c_str(),
+      value_str.c_str(), ex.what());
+    return false;
   }
 }
 
@@ -291,7 +313,7 @@ template<typename TValue>
 void ReadOnlyParameterSpec<TValue>::declareParameter(const rclcpp::Node::SharedPtr & node) const
 {
   rcl_interfaces::msg::ParameterDescriptor descriptor;
-  descriptor.read_only = true;
+  descriptor.read_only = false;
   descriptor.description = description();
   node->declare_parameter(fullName(), defaultValue(), descriptor);
 }
@@ -303,18 +325,15 @@ bool ReadOnlyParameterSpec<TValue>::isWritable() const
 }
 
 template<typename TValue>
-rclcpp::Parameter ReadOnlyParameterSpec<TValue>::toParameter(
-  const DeviceConfiguration & config) const
+rclcpp::Parameter ReadOnlyParameterSpec<TValue>::currentParameter() const
 {
-  const TValue value = config.*member_ptr_;
-  return rclcpp::Parameter(fullName(), toParameterValue(value));
+  return rclcpp::Parameter(fullName(), toParameterValue(current_value_));
 }
 
 template<typename TValue>
-bool ReadOnlyParameterSpec<TValue>::parseAndApplyConfigValue(
+bool ReadOnlyParameterSpec<TValue>::parseAndStoreConfigValue(
   const std::string & value_str,
-  DeviceConfiguration * config,
-  const rclcpp::Logger & logger) const
+  const rclcpp::Logger & logger)
 {
   TValue parsed_value{};
   if (!parseConfigScalar(
@@ -324,8 +343,14 @@ bool ReadOnlyParameterSpec<TValue>::parseAndApplyConfigValue(
     return false;
   }
 
-  config->*member_ptr_ = parsed_value;
+  current_value_ = parsed_value;
   return true;
+}
+
+template<typename TValue>
+void ReadOnlyParameterSpec<TValue>::resetToDefault()
+{
+  current_value_ = default_value_typed_;
 }
 
 template<typename TValue>
@@ -338,18 +363,15 @@ void WritableParameterSpec<TValue>::declareParameter(const rclcpp::Node::SharedP
 }
 
 template<typename TValue>
-rclcpp::Parameter WritableParameterSpec<TValue>::toParameter(
-  const DeviceConfiguration & config) const
+rclcpp::Parameter WritableParameterSpec<TValue>::currentParameter() const
 {
-  const TValue value = config.*member_ptr_;
-  return rclcpp::Parameter(fullName(), toParameterValue(value));
+  return rclcpp::Parameter(fullName(), toParameterValue(current_value_));
 }
 
 template<typename TValue>
-bool WritableParameterSpec<TValue>::parseAndApplyConfigValue(
+bool WritableParameterSpec<TValue>::parseAndStoreConfigValue(
   const std::string & value_str,
-  DeviceConfiguration * config,
-  const rclcpp::Logger & logger) const
+  const rclcpp::Logger & logger)
 {
   TValue parsed_value{};
   if (!parseConfigScalar(
@@ -359,8 +381,14 @@ bool WritableParameterSpec<TValue>::parseAndApplyConfigValue(
     return false;
   }
 
-  config->*member_ptr_ = parsed_value;
+  current_value_ = parsed_value;
   return true;
+}
+
+template<typename TValue>
+void WritableParameterSpec<TValue>::resetToDefault()
+{
+  current_value_ = default_value_typed_;
 }
 
 template<typename TValue>

@@ -177,8 +177,9 @@ with controller configuration snapshots from the serial device.
 Configuration metadata is centralized in `DeviceParameterSpec` definitions (`device_parameter_specs.cpp`).
 The same per-field definitions now drive:
 
-- device config parsing (`#DPCONFIG` key/value -> `DeviceConfiguration`)
-- ROS parameter export (`DeviceConfiguration` -> `device.*`)
+- device config parsing (`#DPCONFIG` key/value -> typed parse + validation)
+- per-device value storage inside the instance-owned parameter spec registry
+- device-to-ROS synchronization (`#DPCONFIG` key/value -> `device.*` parameter updates)
 - writable parameter validation and command generation (`device.*` -> serial command)
 
 This keeps field names, ranges, and type expectations in one place when adding or changing parameters.
@@ -235,6 +236,7 @@ Read-only parameters (from config snapshot parsing):
 Parameter update behavior:
 
 - Writable changes are validated in the parameter callback before queueing serial commands.
+- Non-writable `device.*` parameters are updated from device config reads and rejected if a user tries to set them directly.
 - Ack-tracked updates wait for `Write Settings` then `Updated` feedback from firmware.
 - After update ack, a config refresh (`#DPCONFIG` + `#DPINVALID`) is queued to synchronize all `device.*` values.
 - Device-to-ROS synchronization uses a guard (`parameterSyncInProgress_`) to avoid callback loops.

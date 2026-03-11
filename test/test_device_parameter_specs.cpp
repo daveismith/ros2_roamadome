@@ -23,7 +23,7 @@ TEST(DeviceParameterSpecsTest, GetAllParameterSpecs_ContainsExpectedCounts)
   EXPECT_EQ(writable_count, 8U);
 }
 
-TEST(DeviceParameterSpecsTest, DeviceConfigurationFields_HaveConfigKeyMappings)
+TEST(DeviceParameterSpecsTest, ConfigFields_HaveConfigKeyMappings)
 {
   const std::vector<std::string> required_config_keys = {
     "HomePos",
@@ -141,25 +141,27 @@ TEST(DeviceParameterSpecsTest, FindParameterSpecByConfigKey_ResolvesKnownKey)
   EXPECT_EQ(missing, nullptr);
 }
 
-TEST(DeviceParameterSpecsTest, ParseAndApplyConfigValue_UpdatesStructAndValidatesRange)
+TEST(DeviceParameterSpecsTest, ParseAndStoreConfigValue_UpdatesRegistryAndValidatesRange)
 {
-  DeviceConfiguration config;
+  DeviceParameterRegistry registry;
   const auto logger = rclcpp::get_logger("device_parameter_specs_test");
 
-  const auto * auto_left = findParameterSpecByConfigKey("AutoLeft");
+  auto * auto_left = const_cast<DeviceParameterSpecBase *>(
+    registry.findParameterSpecByConfigKey("AutoLeft"));
   ASSERT_NE(auto_left, nullptr);
-  EXPECT_TRUE(auto_left->parseAndApplyConfigValue("180", &config, logger));
-  EXPECT_EQ(config.auto_left, static_cast<uint8_t>(180));
+  EXPECT_TRUE(auto_left->parseAndStoreConfigValue("180", logger));
+  EXPECT_EQ(auto_left->currentParameter().as_int(), 180);
 
-  EXPECT_FALSE(auto_left->parseAndApplyConfigValue("181", &config, logger));
-  EXPECT_EQ(config.auto_left, static_cast<uint8_t>(180));
+  EXPECT_FALSE(auto_left->parseAndStoreConfigValue("181", logger));
+  EXPECT_EQ(auto_left->currentParameter().as_int(), 180);
 
-  const auto * auto_mode = findParameterSpecByConfigKey("AutoMode");
+  auto * auto_mode = const_cast<DeviceParameterSpecBase *>(
+    registry.findParameterSpecByConfigKey("AutoMode"));
   ASSERT_NE(auto_mode, nullptr);
-  EXPECT_TRUE(auto_mode->parseAndApplyConfigValue("true", &config, logger));
-  EXPECT_TRUE(config.auto_mode);
+  EXPECT_TRUE(auto_mode->parseAndStoreConfigValue("true", logger));
+  EXPECT_TRUE(auto_mode->currentParameter().as_bool());
 
-  EXPECT_FALSE(auto_mode->parseAndApplyConfigValue("banana", &config, logger));
+  EXPECT_FALSE(auto_mode->parseAndStoreConfigValue("banana", logger));
 }
 
 }  // namespace ros2_roamadome
