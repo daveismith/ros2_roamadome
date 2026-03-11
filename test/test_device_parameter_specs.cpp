@@ -79,4 +79,35 @@ TEST(DeviceParameterSpecsTest, ValidateAndBuildCommand_EnforcesRange)
   EXPECT_NE(reason.find("range"), std::string::npos);
 }
 
+TEST(DeviceParameterSpecsTest, FindParameterSpecByConfigKey_ResolvesKnownKey)
+{
+  const auto * spec = findParameterSpecByConfigKey("AutoMode");
+  ASSERT_NE(spec, nullptr);
+  EXPECT_EQ(spec->fullName(), "device.auto_mode");
+
+  const auto * missing = findParameterSpecByConfigKey("NotARealField");
+  EXPECT_EQ(missing, nullptr);
+}
+
+TEST(DeviceParameterSpecsTest, ParseAndApplyConfigValue_UpdatesStructAndValidatesRange)
+{
+  DeviceConfiguration config;
+  const auto logger = rclcpp::get_logger("device_parameter_specs_test");
+
+  const auto * auto_left = findParameterSpecByConfigKey("AutoLeft");
+  ASSERT_NE(auto_left, nullptr);
+  EXPECT_TRUE(auto_left->parseAndApplyConfigValue("180", &config, logger));
+  EXPECT_EQ(config.auto_left, static_cast<uint8_t>(180));
+
+  EXPECT_FALSE(auto_left->parseAndApplyConfigValue("181", &config, logger));
+  EXPECT_EQ(config.auto_left, static_cast<uint8_t>(180));
+
+  const auto * auto_mode = findParameterSpecByConfigKey("AutoMode");
+  ASSERT_NE(auto_mode, nullptr);
+  EXPECT_TRUE(auto_mode->parseAndApplyConfigValue("true", &config, logger));
+  EXPECT_TRUE(config.auto_mode);
+
+  EXPECT_FALSE(auto_mode->parseAndApplyConfigValue("banana", &config, logger));
+}
+
 }  // namespace ros2_roamadome

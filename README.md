@@ -174,6 +174,15 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 After `on_configure()`, the hardware interface declares a `device.*` parameter set and keeps it synchronized
 with controller configuration snapshots from the serial device.
 
+Configuration metadata is centralized in `DeviceParameterSpec` definitions (`device_parameter_specs.cpp`).
+The same per-field definitions now drive:
+
+- device config parsing (`#DPCONFIG` key/value -> `DeviceConfiguration`)
+- ROS parameter export (`DeviceConfiguration` -> `device.*`)
+- writable parameter validation and command generation (`device.*` -> serial command)
+
+This keeps field names, ranges, and type expectations in one place when adding or changing parameters.
+
 Writable parameters (ROS -> device):
 
 | Parameter | Type | Valid Range | Device Command |

@@ -5,8 +5,10 @@
 #include "ros2_roamadome/roamadome_config_parser.hpp"
 
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <limits>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -24,21 +26,29 @@ public:
   virtual void declareParameter(const rclcpp::Node::SharedPtr & node) const = 0;
   virtual bool isWritable() const = 0;
   virtual rclcpp::Parameter toParameter(const DeviceConfiguration & config) const = 0;
+  virtual bool parseAndApplyConfigValue(
+    const std::string & value_str,
+    DeviceConfiguration * config,
+    const rclcpp::Logger & logger) const = 0;
 
   const std::string & fullName() const;
   const std::string & description() const;
   const rclcpp::ParameterValue & defaultValue() const;
+  const std::string & firmwareConfigKey() const;
+  bool hasFirmwareConfigKey() const;
 
 protected:
   DeviceParameterSpecBase(
     std::string full_name,
     rclcpp::ParameterValue default_value,
-    std::string description);
+    std::string description,
+    std::string firmware_config_key = "");
 
 private:
   std::string full_name_;
   rclcpp::ParameterValue default_value_;
   std::string description_;
+  std::string firmware_config_key_;
 };
 
 class WritableParameterSpecBase : public DeviceParameterSpecBase
@@ -49,7 +59,8 @@ public:
     std::string full_name,
     rclcpp::ParameterValue default_value,
     std::string description,
-    std::string command_prefix);
+    std::string command_prefix,
+    std::string firmware_config_key = "");
 
   bool isWritable() const override;
   const std::string & fieldName() const;
@@ -80,16 +91,28 @@ public:
     std::string field_name,
     TValue default_value,
     std::string description,
-    MemberPointer member_ptr)
+    MemberPointer member_ptr,
+    std::string firmware_config_key,
+    TValue min_value = std::numeric_limits<TValue>::lowest(),
+    TValue max_value = std::numeric_limits<TValue>::max())
   : DeviceParameterSpecBase(
-      buildFullName(field_name), toParameterValue(default_value), std::move(description)),
-    member_ptr_(member_ptr)
+      buildFullName(field_name),
+      toParameterValue(default_value),
+      std::move(description),
+      std::move(firmware_config_key)),
+    member_ptr_(member_ptr),
+    min_value_(min_value),
+    max_value_(max_value)
   {
   }
 
   void declareParameter(const rclcpp::Node::SharedPtr & node) const override;
   bool isWritable() const override;
   rclcpp::Parameter toParameter(const DeviceConfiguration & config) const override;
+  bool parseAndApplyConfigValue(
+    const std::string & value_str,
+    DeviceConfiguration * config,
+    const rclcpp::Logger & logger) const override;
 
 private:
   static std::string buildFullName(const std::string & field_name)
@@ -106,6 +129,8 @@ private:
   }
 
   MemberPointer member_ptr_;
+  TValue min_value_;
+  TValue max_value_;
 };
 
 template<typename TValue>
@@ -124,6 +149,7 @@ public:
     std::string description,
     std::string command_prefix,
     MemberPointer member_ptr,
+    std::string firmware_config_key,
     TValue min_value = std::numeric_limits<TValue>::lowest(),
     TValue max_value = std::numeric_limits<TValue>::max(),
     ParameterValidator validator = nullptr)
@@ -132,7 +158,8 @@ public:
       buildFullName(field_name),
       toParameterValue(default_value),
       std::move(description),
-      std::move(command_prefix)),
+      std::move(command_prefix),
+      std::move(firmware_config_key)),
     member_ptr_(member_ptr),
     min_value_(min_value),
     max_value_(max_value),
@@ -142,6 +169,10 @@ public:
 
   void declareParameter(const rclcpp::Node::SharedPtr & node) const override;
   rclcpp::Parameter toParameter(const DeviceConfiguration & config) const override;
+  bool parseAndApplyConfigValue(
+    const std::string & value_str,
+    DeviceConfiguration * config,
+    const rclcpp::Logger & logger) const override;
   bool validateAndBuildCommand(
     const rclcpp::Parameter & parameter,
     std::string * command,
@@ -203,6 +234,58 @@ typename WritableParameterSpec<TValue>::ParameterValidator getBoolTypeLambda()
 
 const std::vector<const DeviceParameterSpecBase *> & getAllParameterSpecs();
 const WritableParameterSpecBase * findWritableParameterSpec(const std::string & field_name);
+const DeviceParameterSpecBase * findParameterSpecByConfigKey(const std::string & config_key);
+
+template<typename TValue>
+bool parseConfigScalar(
+  const std::string & value_str,
+  TValue min_value,
+  TValue max_value,
+  TValue * output,
+  const rclcpp::Logger & logger,
+  const std::string & field_name)
+{
+  if constexpr (std::is_same<TValue, bool>::value) {
+    if (value_str == "0" || value_str == "false" || value_str == "False") {
+      *output = false;
+      return true;
+    }
+    if (value_str == "1" || value_str == "true" || value_str == "True") {
+      *output = true;
+      return true;
+    }
+    RCLCPP_WARN(logger, "Invalid boolean value for %s: '%s'", field_name.c_str(),
+        value_str.c_str());
+    return false;
+  } else {
+    try {
+      size_t parse_end = 0;
+      const unsigned long long parsed = std::stoull(value_str, &parse_end);
+      if (parse_end != value_str.size()) {
+        RCLCPP_WARN(
+          logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
+        return false;
+      }
+
+      if (parsed < static_cast<unsigned long long>(min_value) ||
+        parsed > static_cast<unsigned long long>(max_value))
+      {
+        RCLCPP_WARN(
+          logger, "Value %s out of range [%lld, %lld] for %s", value_str.c_str(),
+          static_cast<long long>(min_value), static_cast<long long>(max_value), field_name.c_str());
+        return false;
+      }
+
+      *output = static_cast<TValue>(parsed);
+      return true;
+    } catch (const std::exception & ex) {
+      RCLCPP_WARN(
+        logger, "Failed to parse numeric value for %s ('%s'): %s", field_name.c_str(),
+        value_str.c_str(), ex.what());
+      return false;
+    }
+  }
+}
 
 template<typename TValue>
 void ReadOnlyParameterSpec<TValue>::declareParameter(const rclcpp::Node::SharedPtr & node) const
@@ -228,6 +311,24 @@ rclcpp::Parameter ReadOnlyParameterSpec<TValue>::toParameter(
 }
 
 template<typename TValue>
+bool ReadOnlyParameterSpec<TValue>::parseAndApplyConfigValue(
+  const std::string & value_str,
+  DeviceConfiguration * config,
+  const rclcpp::Logger & logger) const
+{
+  TValue parsed_value{};
+  if (!parseConfigScalar(
+      value_str, min_value_, max_value_, &parsed_value, logger,
+      firmwareConfigKey()))
+  {
+    return false;
+  }
+
+  config->*member_ptr_ = parsed_value;
+  return true;
+}
+
+template<typename TValue>
 void WritableParameterSpec<TValue>::declareParameter(const rclcpp::Node::SharedPtr & node) const
 {
   rcl_interfaces::msg::ParameterDescriptor descriptor;
@@ -242,6 +343,24 @@ rclcpp::Parameter WritableParameterSpec<TValue>::toParameter(
 {
   const TValue value = config.*member_ptr_;
   return rclcpp::Parameter(fullName(), toParameterValue(value));
+}
+
+template<typename TValue>
+bool WritableParameterSpec<TValue>::parseAndApplyConfigValue(
+  const std::string & value_str,
+  DeviceConfiguration * config,
+  const rclcpp::Logger & logger) const
+{
+  TValue parsed_value{};
+  if (!parseConfigScalar(
+      value_str, min_value_, max_value_, &parsed_value, logger,
+      firmwareConfigKey()))
+  {
+    return false;
+  }
+
+  config->*member_ptr_ = parsed_value;
+  return true;
 }
 
 template<typename TValue>

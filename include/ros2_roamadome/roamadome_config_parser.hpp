@@ -2,11 +2,11 @@
 #define roamadome_config_parser__ROAMADOME_CONFIG_PARSER_HPP_
 
 #include "rclcpp/rclcpp.hpp"
-#include <map>
-#include <string>
-#include <functional>
-#include <optional>
+#include <cstdint>
 #include <chrono>
+#include <map>
+#include <optional>
+#include <string>
 
 namespace ros2_roamadome
 {
@@ -82,37 +82,7 @@ public:
     const rclcpp::Logger & logger);
 
 private:
-  // Type-specific field parsers
-  template<typename T>
-  using FieldParser = std::function<bool(const std::string &, T &, const rclcpp::Logger &)>;
-
-  // Parse uint8_t field with range validation
-  static bool parseUInt8(
-    const std::string & value_str,
-    uint8_t & output,
-    const rclcpp::Logger & logger,
-    uint8_t min_val = 0,
-    uint8_t max_val = 255);
-
-  // Parse uint16_t field with range validation
-  static bool parseUInt16(
-    const std::string & value_str,
-    uint16_t & output,
-    const rclcpp::Logger & logger,
-    uint16_t min_val = 0,
-    uint16_t max_val = 65535);
-
-  // Parse uint32_t field with range validation
-  static bool parseUInt32(
-    const std::string & value_str,
-    uint32_t & output,
-    const rclcpp::Logger & logger);
-
-  // Parse bool field (0/1 or true/false)
-  static bool parseBool(
-    const std::string & value_str,
-    bool & output,
-    const rclcpp::Logger & logger);
+  // Intentionally empty for now; parsing is delegated to device parameter specs.
 };
 
 }  // namespace ros2_roamadome
