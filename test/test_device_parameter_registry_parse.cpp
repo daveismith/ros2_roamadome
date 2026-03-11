@@ -5,7 +5,6 @@
 #include <string>
 
 #include "ros2_roamadome/device_parameter_specs.hpp"
-#include "ros2_roamadome/roamadome_config_parser.hpp"
 
 namespace ros2_roamadome
 {
@@ -17,7 +16,7 @@ const DeviceParameterSpecBase * findSpecByConfigKey(
   return registry.findParameterSpecByConfigKey(config_key);
 }
 
-TEST(ConfigurationParserTest, Parse_UnknownFieldIsIgnored)
+TEST(DeviceParameterRegistryParseTest, Parse_UnknownFieldIsIgnored)
 {
   const std::map<std::string, std::string> config_map = {
     {"UnknownThing", "123"},
@@ -26,7 +25,7 @@ TEST(ConfigurationParserTest, Parse_UnknownFieldIsIgnored)
 
   const auto logger = rclcpp::get_logger("config_parser_test");
   DeviceParameterRegistry registry;
-  const bool parsed = ConfigurationParser::parseIntoRegistry(config_map, &registry, logger);
+  const bool parsed = registry.parseConfigMap(config_map, logger);
 
   EXPECT_TRUE(parsed);
   const auto * auto_mode = findSpecByConfigKey(registry, "AutoMode");
@@ -34,7 +33,7 @@ TEST(ConfigurationParserTest, Parse_UnknownFieldIsIgnored)
   EXPECT_TRUE(auto_mode->currentParameter().as_bool());
 }
 
-TEST(ConfigurationParserTest, Parse_InvalidValueKeepsDefault)
+TEST(DeviceParameterRegistryParseTest, Parse_InvalidValueKeepsDefault)
 {
   const std::map<std::string, std::string> config_map = {
     {"AutoLeft", "181"},
@@ -43,7 +42,7 @@ TEST(ConfigurationParserTest, Parse_InvalidValueKeepsDefault)
 
   const auto logger = rclcpp::get_logger("config_parser_test");
   DeviceParameterRegistry registry;
-  const bool parsed = ConfigurationParser::parseIntoRegistry(config_map, &registry, logger);
+  const bool parsed = registry.parseConfigMap(config_map, logger);
 
   EXPECT_FALSE(parsed);
   const auto * auto_left = findSpecByConfigKey(registry, "AutoLeft");
@@ -54,7 +53,7 @@ TEST(ConfigurationParserTest, Parse_InvalidValueKeepsDefault)
   EXPECT_FALSE(auto_mode->currentParameter().as_bool());
 }
 
-TEST(ConfigurationParserTest, Parse_ResetsMissingFieldsToDefaults)
+TEST(DeviceParameterRegistryParseTest, Parse_ResetsMissingFieldsToDefaults)
 {
   const std::map<std::string, std::string> config_map = {
     {"AutoMode", "1"},
@@ -64,13 +63,13 @@ TEST(ConfigurationParserTest, Parse_ResetsMissingFieldsToDefaults)
   const auto logger = rclcpp::get_logger("config_parser_test");
   DeviceParameterRegistry registry;
 
-  ASSERT_TRUE(ConfigurationParser::parseIntoRegistry(config_map, &registry, logger));
+  ASSERT_TRUE(registry.parseConfigMap(config_map, logger));
 
   const std::map<std::string, std::string> partial_update = {
     {"AutoMode", "0"}
   };
 
-  ASSERT_TRUE(ConfigurationParser::parseIntoRegistry(partial_update, &registry, logger));
+  ASSERT_TRUE(registry.parseConfigMap(partial_update, logger));
 
   const auto * auto_mode = findSpecByConfigKey(registry, "AutoMode");
   const auto * auto_left = findSpecByConfigKey(registry, "AutoLeft");
@@ -81,7 +80,7 @@ TEST(ConfigurationParserTest, Parse_ResetsMissingFieldsToDefaults)
   EXPECT_EQ(auto_left->currentParameter().as_int(), 80);
 }
 
-TEST(ConfigurationParserTest, Parse_AllConfigFieldsRoundTripIntoRegistry)
+TEST(DeviceParameterRegistryParseTest, Parse_AllConfigFieldsRoundTripIntoRegistry)
 {
   const std::map<std::string, std::string> config_map = {
     {"HomePos", "10"},
@@ -129,7 +128,7 @@ TEST(ConfigurationParserTest, Parse_AllConfigFieldsRoundTripIntoRegistry)
 
   const auto logger = rclcpp::get_logger("config_parser_test");
   DeviceParameterRegistry registry;
-  ASSERT_TRUE(ConfigurationParser::parseIntoRegistry(config_map, &registry, logger));
+  ASSERT_TRUE(registry.parseConfigMap(config_map, logger));
 
   EXPECT_EQ(findSpecByConfigKey(registry, "HomePos")->currentParameter().as_int(), 10);
   EXPECT_EQ(findSpecByConfigKey(registry, "MaxSpeed")->currentParameter().as_int(), 99);

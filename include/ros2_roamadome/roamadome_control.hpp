@@ -6,7 +6,6 @@
 
 #include "ros2_roamadome/device_parameter_specs.hpp"
 #include "ros2_roamadome/visibility_control.h"
-#include "ros2_roamadome/roamadome_config_parser.hpp"
 #include "ros2_roamadome/roamadome_serial_port.hpp"
 #include "hardware_interface/actuator_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
@@ -310,8 +309,8 @@ public:
     {
       {
         std::lock_guard<std::mutex> lock(controller_->deviceParameterRegistry_mutex_);
-        const bool parsed_cleanly = ConfigurationParser::parseIntoRegistry(
-          config, &controller_->deviceParameterRegistry_, controller_->logger_);
+        const bool parsed_cleanly = controller_->deviceParameterRegistry_.parseConfigMap(
+          config, controller_->logger_);
         if (!parsed_cleanly) {
           RCLCPP_WARN(controller_->logger_,
             "Device configuration parsed with one or more field errors");

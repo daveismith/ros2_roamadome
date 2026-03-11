@@ -24,7 +24,6 @@ add_library(ros2_roamadome
   src/device_parameter_specs.cpp
   src/roamadome_serial_port.cpp
   src/parameter_parser.cpp
-  src/roamadome_config_parser.cpp
 )
 add_library(ros2_roamadome::roamadome_control ALIAS ros2_roamadome)
 target_compile_features(ros2_roamadome PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
@@ -101,13 +100,15 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_device_parameter_specs ros2_roamadome)
 
-  # Unit tests for ConfigurationParser
-  ament_add_gtest(test_roamadome_config_parser test/test_roamadome_config_parser.cpp)
-  target_include_directories(test_roamadome_config_parser PUBLIC
+  # Unit tests for DeviceParameterRegistry config parsing
+  ament_add_gtest(
+    test_device_parameter_registry_parse
+    test/test_device_parameter_registry_parse.cpp)
+  target_include_directories(test_device_parameter_registry_parse PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
   )
-  target_link_libraries(test_roamadome_config_parser ros2_roamadome)
+  target_link_libraries(test_device_parameter_registry_parse ros2_roamadome)
 endif()
 
 ament_export_include_directories(

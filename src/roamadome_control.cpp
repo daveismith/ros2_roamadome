@@ -1,7 +1,6 @@
 #include "ros2_roamadome/roamadome_control.hpp"
 #include "ros2_roamadome/device_parameter_specs.hpp"
 #include "ros2_roamadome/parameter_parser.hpp"
-#include "ros2_roamadome/roamadome_config_parser.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
