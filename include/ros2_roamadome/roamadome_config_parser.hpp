@@ -11,8 +11,9 @@
 namespace ros2_roamadome
 {
 
-// Forward declare the DeviceConfiguration struct from roamadome_control.hpp
-// We can't include it here to avoid circular dependency
+// DeviceConfiguration is defined here (not in roamadome_control.hpp) to avoid
+// a circular include: roamadome_control.hpp includes device_parameter_specs.hpp,
+// which includes this header.
 struct DeviceConfiguration
 {
   uint16_t home_pos = 0;

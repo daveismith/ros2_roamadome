@@ -354,6 +354,12 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
       "~/setup",
       [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>/* request */,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        if (!serialHandler_ || !serialHandler_->isOpen()) {
+          response->success = false;
+          response->message = "hardware interface is not active; command not queued";
+          RCLCPP_WARN(logger_, "Setup service called while hardware is inactive; ignoring");
+          return;
+        }
         std::lock_guard<std::mutex> lock(sendQueue_mutex_);
         sendQueue_.push({"setup", "#DPSETUP", RoamadomeControl::SendQueueCommand::Flow::ONE_SHOT,
           false});
@@ -1195,9 +1201,11 @@ void RoamadomeControl::declareDeviceParameters()
     return;
   }
 
-  // All device parameters
+  // All device parameters — skip already-declared ones to survive re-configure
   for (const auto * spec : getAllParameterSpecs()) {
-    spec->declareParameter(node);
+    if (!node->has_parameter(spec->fullName())) {
+      spec->declareParameter(node);
+    }
   }
 
   RCLCPP_INFO(logger_, "Device parameters declared");
@@ -1280,10 +1288,17 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
 
     // Extract field name
     std::string field_name = name.substr(7);  // Remove "device." prefix
-    const WritableParameterSpec * spec = findWritableParameterSpec(field_name);
+    const WritableParameterSpecBase * spec = findWritableParameterSpec(field_name);
     if (nullptr == spec) {
       RCLCPP_DEBUG(logger_, "Ignoring non-writable device parameter update: %s", name.c_str());
       continue;
+    }
+
+    if (!serialHandler_ || !serialHandler_->isOpen()) {
+      result.successful = false;
+      result.reason = "cannot update device parameter " + name +
+        ": hardware interface is not active";
+      return result;
     }
 
     std::string command;
