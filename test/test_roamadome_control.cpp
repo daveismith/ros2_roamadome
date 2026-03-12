@@ -48,6 +48,7 @@ protected:
     // Add hardware parameters
     info.hardware_parameters["serial_port"] = "/dev/ttyACM0";
     info.hardware_parameters["serial_baud"] = "115200";
+    info.hardware_parameters["baud_sweep_sleep_ms"] = "0";
 
     // Create the specified number of joints
     for (size_t i = 0; i < num_joints; ++i) {
@@ -78,6 +79,24 @@ protected:
     }
 
     return info;
+  }
+
+  rcl_interfaces::msg::SetParametersResult setDeviceParametersForTest(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    return controller_->onParameterChange(parameters);
+  }
+
+  std::vector<rclcpp::Parameter> filterChangedParametersForTest(
+    const rclcpp::Node::SharedPtr & node,
+    const std::vector<rclcpp::Parameter> & desired_parameters)
+  {
+    return RoamadomeControl::filterChangedParameters(node, desired_parameters);
+  }
+
+  void setLifecycleActiveForTest(bool active)
+  {
+    controller_->lifecycleActive_.store(active);
   }
 
   std::unique_ptr<RoamadomeControl> controller_;
@@ -139,7 +158,7 @@ public:
 
       struct timeval tv;
       tv.tv_sec = 0;
-      tv.tv_usec = 100000;
+      tv.tv_usec = 5000;
 
       int ret = select(master_fd_ + 1, &readfds, nullptr, nullptr, &tv);
       if (ret > 0 && FD_ISSET(master_fd_, &readfds)) {
@@ -172,6 +191,30 @@ public:
 private:
   int master_fd_ = -1;
   std::string slave_path_;
+};
+
+class FirmwareThreadGuard
+{
+public:
+  FirmwareThreadGuard(std::atomic<bool> * running, std::thread * worker)
+  : running_(running), worker_(worker)
+  {
+  }
+
+  ~FirmwareThreadGuard()
+  {
+    if (running_) {
+      running_->store(false);
+    }
+
+    if (worker_ && worker_->joinable()) {
+      worker_->join();
+    }
+  }
+
+private:
+  std::atomic<bool> * running_;
+  std::thread * worker_;
 };
 
 /**
@@ -298,6 +341,79 @@ TEST_F(RoamadomeControlTest, ExportCommandInterfaces_DynamicJointName)
   EXPECT_EQ(command_interfaces[1].get_interface_name(), "velocity");
   EXPECT_EQ(command_interfaces[0].get_prefix_name(), info.joints[0].name);
   EXPECT_EQ(command_interfaces[1].get_prefix_name(), info.joints[0].name);
+}
+
+TEST_F(RoamadomeControlTest, DeviceParameterSync_SkipsUnchangedSnapshots)
+{
+  if (!rclcpp::ok()) {
+    int argc = 0;
+    char ** argv = nullptr;
+    rclcpp::init(argc, argv);
+  }
+
+  auto node = std::make_shared<rclcpp::Node>("device_parameter_sync_test");
+  node->declare_parameter("device.auto_mode", false);
+  node->declare_parameter("device.home_mode", false);
+
+  const std::vector<rclcpp::Parameter> initial_snapshot = {
+    rclcpp::Parameter("device.auto_mode", true),
+    rclcpp::Parameter("device.home_mode", false)
+  };
+  const auto first_changed = filterChangedParametersForTest(node, initial_snapshot);
+  ASSERT_EQ(first_changed.size(), 1u);
+  EXPECT_EQ(first_changed[0].get_name(), "device.auto_mode");
+
+  auto first_results = node->set_parameters(first_changed);
+  ASSERT_EQ(first_results.size(), 1u);
+  EXPECT_TRUE(first_results[0].successful);
+
+  const auto unchanged = filterChangedParametersForTest(node, initial_snapshot);
+  EXPECT_TRUE(unchanged.empty());
+
+  const std::vector<rclcpp::Parameter> updated_snapshot = {
+    rclcpp::Parameter("device.auto_mode", true),
+    rclcpp::Parameter("device.home_mode", true)
+  };
+  const auto second_changed = filterChangedParametersForTest(node, updated_snapshot);
+  ASSERT_EQ(second_changed.size(), 1u);
+  EXPECT_EQ(second_changed[0].get_name(), "device.home_mode");
+
+  auto second_results = node->set_parameters(second_changed);
+  ASSERT_EQ(second_results.size(), 1u);
+  EXPECT_TRUE(second_results[0].successful);
+
+  bool auto_mode = false;
+  bool home_mode = false;
+  ASSERT_TRUE(node->get_parameter("device.auto_mode", auto_mode));
+  ASSERT_TRUE(node->get_parameter("device.home_mode", home_mode));
+  EXPECT_TRUE(auto_mode);
+  EXPECT_TRUE(home_mode);
+}
+
+TEST_F(RoamadomeControlTest, OnParameterChange_RejectsReadOnlyDeviceParameter)
+{
+  const auto result = setDeviceParametersForTest(
+    {rclcpp::Parameter("device.home_pos", static_cast<int64_t>(90))});
+
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("read-only"), std::string::npos);
+}
+
+TEST_F(RoamadomeControlTest, OnParameterChange_WritableParameterRequiresActiveHardware)
+{
+  const auto result = setDeviceParametersForTest(
+    {rclcpp::Parameter("device.auto_mode", true)});
+
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("hardware interface is inactive"), std::string::npos);
+}
+
+TEST_F(RoamadomeControlTest, OnParameterChange_IgnoresNonDeviceParameter)
+{
+  const auto result = setDeviceParametersForTest(
+    {rclcpp::Parameter("some_other_param", 123)});
+
+  EXPECT_TRUE(result.successful);
 }
 
 /**
@@ -482,6 +598,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_SkipsSetupWhenAutoSafetyNotEn
         }
       }
     });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
 
   rclcpp_lifecycle::State previous_state(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
@@ -579,6 +696,7 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_RunsSetupWhenAutoSafetyEngage
         }
       }
     });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
 
   rclcpp_lifecycle::State previous_state(
     lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
@@ -722,21 +840,30 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_UsesConfigurableSetupTimeout)
   EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
 
   int setup_index = -1;
-  int config_index = -1;
+  int first_config_index = -1;
+  int config_after_setup_index = -1;
   {
     std::lock_guard<std::mutex> lock(commands_mutex);
     for (size_t idx = 0; idx < seen_commands.size(); ++idx) {
+      const bool is_config = seen_commands[idx].rfind("#DPCONFIG", 0) == 0;
+      if (first_config_index < 0 && is_config) {
+        first_config_index = static_cast<int>(idx);
+      }
       if (setup_index < 0 && seen_commands[idx].rfind("#DPSETUP", 0) == 0) {
         setup_index = static_cast<int>(idx);
       }
-      if (config_index < 0 && seen_commands[idx].rfind("#DPCONFIG", 0) == 0) {
-        config_index = static_cast<int>(idx);
+      if (setup_index >= 0 && config_after_setup_index < 0 && is_config &&
+        static_cast<int>(idx) > setup_index)
+      {
+        config_after_setup_index = static_cast<int>(idx);
       }
     }
   }
 
+  EXPECT_GE(first_config_index, 0);
   EXPECT_GE(setup_index, 0);
-  EXPECT_EQ(config_index, -1);
+  EXPECT_LT(first_config_index, setup_index);
+  EXPECT_EQ(config_after_setup_index, -1);
 }
 
 /**
@@ -1483,6 +1610,135 @@ TEST_F(RoamadomeControlTest, StartupSequence_HomeMode_AlreadyMatches_SkipsSetCom
     }
   }
   EXPECT_FALSE(home_seen);
+}
+
+/**
+ * ============================================================================
+ * RUNTIME SEND-QUEUE ACK FLOW TESTS
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, RuntimeQueue_ParameterUpdateAck_TriggersConfigRefreshAfterUpdated)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::vector<std::string> seen_commands;
+  std::mutex commands_mutex;
+
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+
+        if (!line.empty() && '#' == line.front()) {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back(line);
+        } else if (line.rfind("DP", 0) == 0) {
+          // PTY can occasionally drop the leading '#'; normalize for assertions.
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          seen_commands.push_back("#" + line);
+        }
+
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state),
+    hardware_interface::CallbackReturn::SUCCESS);
+
+  // Unit tests for this class run without a lifecycle node, so mark the
+  // controller active via the fixture helper to exercise writable updates.
+  setLifecycleActiveForTest(true);
+
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    seen_commands.clear();
+  }
+
+  auto set_result = setDeviceParametersForTest({rclcpp::Parameter("device.auto_mode", true)});
+  ASSERT_TRUE(set_result.successful) << set_result.reason;
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
+
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+
+  auto wait_for_command = [&](const std::string & exact, int timeout_ms) -> bool {
+      const auto start = std::chrono::steady_clock::now();
+      while (true) {
+        {
+          std::lock_guard<std::mutex> lock(commands_mutex);
+          for (const auto & cmd : seen_commands) {
+            if (cmd == exact) {
+              return true;
+            }
+          }
+        }
+
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() > timeout_ms) {
+          return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    };
+
+  ASSERT_TRUE(wait_for_command("#DPAUTO1", 500));
+
+  pty.writeText("Write Settings\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+
+  {
+    std::lock_guard<std::mutex> lock(commands_mutex);
+    EXPECT_EQ(
+      std::count(seen_commands.begin(), seen_commands.end(), "#DPCONFIG"),
+      0);
+    EXPECT_EQ(
+      std::count(seen_commands.begin(), seen_commands.end(), "#DPINVALID"),
+      0);
+  }
+
+  pty.writeText("Updated\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+
+  ASSERT_TRUE(wait_for_command("#DPCONFIG", 500));
+
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(wait_for_command("#DPINVALID", 500));
+
 }
 
 }  // namespace ros2_roamadome

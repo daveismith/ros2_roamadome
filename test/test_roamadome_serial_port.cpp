@@ -193,7 +193,7 @@ protected:
   void writeDataAndWait(const std::string & data)
   {
     pipe_->writeData(data);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
 
   std::string readOutgoingData(size_t max_bytes = 256)
@@ -214,7 +214,7 @@ protected:
         return output;
       }
 
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     close(fd);
@@ -1102,7 +1102,7 @@ TEST_F(RoamadomeSerialPortTest, SectionFlushOccursOnTimeoutInLaterReadCall)
   EXPECT_FALSE(observer.configUpdateCalled())
     << "Config should not flush before timeout without a section boundary";
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
   serialPort_->read();
 
   ASSERT_TRUE(observer.configUpdateCalled())
@@ -1133,12 +1133,12 @@ TEST_F(RoamadomeSerialPortTest, SectionFlushIsOneShotAfterTimeout)
     "ready\n");
   serialPort_->read();
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
   serialPort_->read();
   EXPECT_EQ(observer.statusUpdateCount(), 1);
 
   // Additional reads without a new STATUS section must not trigger duplicates.
-  std::this_thread::sleep_for(std::chrono::milliseconds(35));
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
   serialPort_->read();
   EXPECT_EQ(observer.statusUpdateCount(), 1);
 }

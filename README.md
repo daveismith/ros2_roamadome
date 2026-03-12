@@ -169,6 +169,120 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 - `startup_log_level=debug`: Startup transition logs only appear when running with `--ros-args --log-level debug`
 - `startup_log_level=info`: Startup transition logs always appear at default log level
 
+### Runtime ROS Parameters (device.*)
+
+After `on_configure()`, the hardware interface declares a `device.*` parameter set and keeps it synchronized
+with controller configuration snapshots from the serial device.
+
+Configuration metadata is centralized in `DeviceParameterSpec` definitions (`device_parameter_specs.cpp`).
+The same per-field definitions now drive:
+
+- device config parsing (`#DPCONFIG` key/value -> typed parse + validation)
+- per-device value storage inside the instance-owned parameter spec registry
+- device-to-ROS synchronization (`#DPCONFIG` key/value -> `device.*` parameter updates)
+- writable parameter validation and command generation (`device.*` -> serial command)
+
+This keeps field names, ranges, and type expectations in one place when adding or changing parameters.
+
+When adding or modifying spec definitions in `device_parameter_specs.cpp`, use this constructor order:
+
+- `ReadOnlyParameterSpec`: `field_name`, `firmware_config_key`, `description`, `default_value`,
+  `min_value`, `max_value`
+- `WritableParameterSpec`: `field_name`, `firmware_config_key`, `description`, `command_prefix`,
+  `default_value`, `min_value`, `max_value`
+
+`firmware_config_key` is required for all specs and is used for `#DPCONFIG` key mapping.
+
+Writable parameters (ROS -> device):
+
+| Parameter | Type | Valid Range | Device Command |
+|-----------|------|-------------|----------------|
+| `device.auto_mode` | bool | `true/false` | `#DPAUTO0/1` |
+| `device.home_mode` | bool | `true/false` | `#DPHOME0/1` |
+| `device.auto_left` | int | `0..180` | `#DPAUTOLEFT<n>` |
+| `device.auto_right` | int | `0..180` | `#DPAUTORIGHT<n>` |
+| `device.auto_min_delay` | int | `0..255` | `#DPAUTOMIN<n>` |
+| `device.auto_max_delay` | int | `0..255` | `#DPAUTOMAX<n>` |
+| `device.speed_auto` | int | `0..100` | `#DPAUTOSPEED<n>` |
+| `device.fudge` | int | `0..20` | `#DPFUDGE<n>` |
+
+Read-only parameters (from config snapshot parsing):
+
+- `device.home_pos`
+- `device.max_speed`
+- `device.min_speed`
+- `device.input_speed`
+- `device.scaling`
+- `device.inverted`
+- `device.timeout`
+- `device.auto_safety`
+- `device.auto_restart`
+- `device.acceleration_scale`
+- `device.deceleration_scale`
+- `device.home_min_delay`
+- `device.home_max_delay`
+- `device.target_min_delay`
+- `device.target_max_delay`
+- `device.setup_angular_velocity`
+- `device.speed_home`
+- `device.speed_target`
+- `device.syren_address_in`
+- `device.syren_address_out`
+- `device.sensor_baud`
+- `device.syren_baud`
+- `device.serial_baud`
+- `device.serial_in`
+- `device.serial_out`
+- `device.pwm_in`
+- `device.pwm_out`
+- `device.pwm_min_pulse`
+- `device.pwm_max_pulse`
+- `device.pwm_neutral_pulse`
+- `device.pwm_deadband`
+- `device.pwm_arc_mode`
+- `device.digital_out`
+
+Parameter update behavior:
+
+- Non-writable `device.*` fields are declared with `read_only=false` at the ROS descriptor layer so
+  internal Device->ROS snapshot sync (`node->set_parameters(...)`) can update them.
+- The device parameter callback is registered during `on_configure()` when parameters are declared,
+  so writes between configure and activate are still validated deterministically.
+- External writes to non-writable `device.*` fields are rejected in
+  `RoamadomeControl::onParameterChange(...)`.
+- External writes to writable `device.*` fields are rejected while hardware is inactive
+  (`on_configure` completed but not active, or deactivated).
+- Writable changes are validated in the parameter callback before queueing serial commands.
+- Non-writable `device.*` parameters are updated from device config reads and rejected if a user tries to set them directly.
+- Ack-tracked updates wait for `Write Settings` then `Updated` feedback from firmware.
+- After update ack, a config refresh (`#DPCONFIG` + `#DPINVALID`) is queued to synchronize all `device.*` values.
+- Device-to-ROS synchronization uses a thread-local callback bypass guard to avoid callback loops
+  without dropping concurrent external writes from other threads.
+- Firmware config parsing accepts `SetupAngularVelocity` values as plain numbers (for example,
+  `100`) or with an optional `cm/s` suffix (for example, `100 cm/s`).
+
+### Parameter Mutability Test Plan
+
+- Verify internal sync path can update non-writable `device.*` fields through `set_parameters(...)`.
+- Verify external writes to non-writable `device.*` fields are rejected with a clear reason.
+- Verify writable `device.*` fields still go through callback validation and active-hardware checks.
+- Verify non-`device.*` parameters are ignored by the device callback policy.
+
+Examples:
+
+```bash
+# Toggle auto mode at runtime
+ros2 param set /roamadome device.auto_mode true
+
+# Update auto sweep limits
+ros2 param set /roamadome device.auto_left 90
+ros2 param set /roamadome device.auto_right 90
+
+# Read back synchronized values
+ros2 param get /roamadome device.auto_mode
+ros2 param get /roamadome device.home_pos
+```
+
 ### Startup Configure Sequence
 
 During `on_configure()`, the hardware interface performs a deterministic startup sequence to ensure the device is properly configured:
@@ -258,6 +372,46 @@ Each wait state performs serial reads in a loop with configurable timeouts:
 - `#DPSETUP` output may include `GOOD MAX SPEED: <n>` from the firmware; this value is currently treated as informational and is not parsed or stored by the ROS2 interface
 - Transitions are data-driven from a startup command table with conditional branching via lambda functions
 - Configuration data includes a timestamp to detect stale data (warns if older than `startup_config_stale_warning_ms`, default 30 seconds)
+
+## Integration Testing And Validation
+
+Use this sequence for full validation on a real robot or test bench:
+
+1. Build and run package tests:
+
+```bash
+cd ~/r2_ws
+source setup.bash
+colcon build --packages-select ros2_roamadome --symlink-install
+colcon test --packages-select ros2_roamadome --event-handlers console_direct+
+```
+
+2. Launch hardware stack and verify startup:
+
+```bash
+source setup.bash
+ros2 launch r2_bringup launch_robot.launch.py
+```
+
+3. Trigger setup service and verify success:
+
+```bash
+ros2 service call /roamadome/setup std_srvs/srv/Trigger
+```
+
+4. Validate parameter sync path end-to-end:
+
+```bash
+ros2 param set /roamadome device.auto_mode false
+ros2 param get /roamadome device.auto_mode
+```
+
+5. Check logs for expected ack and sync flow:
+
+- `Queued parameter update: device.*`
+- `Received 'Write Settings'`
+- `Received 'Updated'`
+- `Device->ROS parameter sync complete`
 
 ### Command Terminators
 

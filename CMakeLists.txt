@@ -16,10 +16,12 @@ find_package(hardware_interface REQUIRED)
 find_package(controller_manager REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # build library
 add_library(ros2_roamadome
   src/roamadome_control.cpp
+  src/device_parameter_specs.cpp
   src/roamadome_serial_port.cpp
   src/parameter_parser.cpp
 )
@@ -37,6 +39,7 @@ ament_target_dependencies(ros2_roamadome PUBLIC
   controller_manager
   rclcpp
   pluginlib
+  std_srvs
 )
 pluginlib_export_plugin_description_file(hardware_interface robot_hardware.xml)
 
@@ -88,6 +91,24 @@ if(BUILD_TESTING)
     $<INSTALL_INTERFACE:include>
   )
   target_link_libraries(test_roamadome_control ros2_roamadome)
+
+  # Unit tests for DeviceParameterSpecs
+  ament_add_gtest(test_device_parameter_specs test/test_device_parameter_specs.cpp)
+  target_include_directories(test_device_parameter_specs PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_device_parameter_specs ros2_roamadome)
+
+  # Unit tests for DeviceParameterRegistry config parsing
+  ament_add_gtest(
+    test_device_parameter_registry_parse
+    test/test_device_parameter_registry_parse.cpp)
+  target_include_directories(test_device_parameter_registry_parse PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_device_parameter_registry_parse ros2_roamadome)
 endif()
 
 ament_export_include_directories(

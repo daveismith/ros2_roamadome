@@ -1,4 +1,5 @@
 #include "ros2_roamadome/roamadome_control.hpp"
+#include "ros2_roamadome/device_parameter_specs.hpp"
 #include "ros2_roamadome/parameter_parser.hpp"
 #include <algorithm>
 #include <cctype>
@@ -21,6 +22,14 @@ namespace ros2_roamadome
 
 namespace
 {
+
+bool parameterValuesMatch(
+  const rclcpp::Parameter & current_parameter,
+  const rclcpp::Parameter & desired_parameter)
+{
+  return current_parameter.get_type() == desired_parameter.get_type() &&
+         current_parameter.get_parameter_value() == desired_parameter.get_parameter_value();
+}
 
 bool matchesInterfaceName(const std::string & interface_name, std::string_view expected_name)
 {
@@ -81,13 +90,34 @@ std::string buildTransitionLambdaFailure(const std::string & reason)
   return stream.str();
 }
 
+bool & parameterSyncCallbackBypass()
+{
+  static thread_local bool bypass = false;
+  return bypass;
+}
+
+class ScopedParameterSyncCallbackBypass
+{
+public:
+  ScopedParameterSyncCallbackBypass()
+  {
+    parameterSyncCallbackBypass() = true;
+  }
+
+  ~ScopedParameterSyncCallbackBypass()
+  {
+    parameterSyncCallbackBypass() = false;
+  }
+};
+
 }  // namespace
 
 RoamadomeControl::RoamadomeControl()
 : logger_(rclcpp::get_logger("RoamadomeControl")), position_(0.0), velocity_(0.0),
   cmd_position_(0.0), cmd_velocity_(0.0),
   currentMode_(CommandMode::IDLE),
-  lastSentPosition_(-1.0), lastSentVelocity_(0.0)
+  lastSentPosition_(-1.0), lastSentVelocity_(0.0),
+  configRefreshIntervalMs_(60000)
 {
   std::cout << "RoamadomeControl initialized." << std::endl;
 }
@@ -231,6 +261,18 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   if (!parseOptionalUInt32Parameter(
       parameters,
       logger_,
+      "baud_sweep_sleep_ms",
+      500,
+      nullptr,
+      "",
+      &baudSweepSleepMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
       "startup_config_stale_warning_ms",
       30000,
       nullptr,
@@ -257,6 +299,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   RCLCPP_INFO(logger_, "Startup timeouts: default=%u ms setup=%u ms report=%u ms retries=%u",
               startupDefaultTimeoutMs_, startupSetupTimeoutMs_, startupReportTimeoutMs_,
               startupMaxRetries_);
+  RCLCPP_INFO(logger_, "Startup baud sweep settle sleep: %u ms", baudSweepSleepMs_);
 
   initializeStartupCommandTable();
 
@@ -266,13 +309,14 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
 hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   const rclcpp_lifecycle::State & previous_state)
 {
-  struct timespec ts = {};
-  ts.tv_sec = 0;
-  ts.tv_nsec = 500000000;
+  lifecycleActive_.store(false);
+
   if (0 == info_.rw_rate) {
     RCLCPP_ERROR(logger_, "Invalid rw_rate: 0");
     return hardware_interface::CallbackReturn::ERROR;
   }
+
+  const std::chrono::milliseconds baud_settle_sleep(baudSweepSleepMs_);
 
   const uint32_t cycle_ms = std::max<uint32_t>(1U, 1000U / info_.rw_rate);
   const uint32_t report_ms = (cycle_ms > 5U) ? (cycle_ms - 5U) : 1U;
@@ -280,6 +324,9 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   RCLCPP_INFO(logger_, "Configuring RoamadomeControl from state: %s",
       previous_state.label().c_str());
   RCLCPP_INFO(logger_, "Read Rate in Hz: %u (#DPREPORT%u)", info_.rw_rate, report_ms);
+
+  // Declare parameters before startup reads so config callbacks can safely update values.
+  declareDeviceParameters();
 
   // Create and setup the serial handler
   serialHandler_ = std::make_unique<RoamadomeSerialPort>(serialPort_);
@@ -319,7 +366,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
 
     // Read any opportunistic feedback while sweeping baud rates.
     serialHandler_->read();
-    nanosleep(&ts, NULL);
+    std::this_thread::sleep_for(baud_settle_sleep);
   }
 
   if (!serialHandler_->configurePort(serialBaud_)) {
@@ -328,7 +375,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     serialHandler_.reset();
     return hardware_interface::CallbackReturn::ERROR;
   }
-  nanosleep(&ts, NULL);
+  std::this_thread::sleep_for(baud_settle_sleep);
 
   if (!runStartupStateMachine(report_ms)) {
     RCLCPP_ERROR(logger_, "Startup state machine failed: %s",
@@ -804,6 +851,49 @@ void RoamadomeControl::handleStartupUnhandledLine(const std::string & line)
 
 }
 
+void RoamadomeControl::enqueueConfigDumpWithInvalidLocked(const std::string & reason)
+{
+  sendQueue_.push({reason + " #DPCONFIG", "#DPCONFIG", SendQueueCommand::Flow::ONE_SHOT, false});
+  sendQueue_.push({reason + " #DPINVALID", "#DPINVALID", SendQueueCommand::Flow::ONE_SHOT, false});
+}
+
+void RoamadomeControl::handleSendQueueFeedback(const std::string & line)
+{
+  std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+  if (!sendQueueCommandActive_) {
+    return;
+  }
+
+  if (SendQueueCommand::Flow::PARAMETER_UPDATE_ACK != activeSendQueueCommand_.flow) {
+    return;
+  }
+
+  if (SendQueueStage::WAIT_WRITE_SETTINGS == sendQueueStage_) {
+    if ("Write Settings" == line) {
+      sendQueueStage_ = SendQueueStage::WAIT_UPDATED;
+      sendQueueStageStartTime_ = std::chrono::steady_clock::now();
+      RCLCPP_DEBUG(logger_, "Received 'Write Settings' for %s",
+        activeSendQueueCommand_.label.c_str());
+      return;
+    }
+
+    if ("Updated" == line) {
+      RCLCPP_WARN(logger_, "Received 'Updated' before 'Write Settings' for %s",
+        activeSendQueueCommand_.label.c_str());
+      return;
+    }
+  }
+
+  if (SendQueueStage::WAIT_UPDATED == sendQueueStage_ && "Updated" == line) {
+    RCLCPP_DEBUG(logger_, "Received 'Updated' for %s", activeSendQueueCommand_.label.c_str());
+    if (activeSendQueueCommand_.post_ack_config_dump) {
+      enqueueConfigDumpWithInvalidLocked("post-update");
+    }
+    sendQueueCommandActive_ = false;
+    sendQueueStage_ = SendQueueStage::IDLE;
+  }
+}
+
 void RoamadomeControl::logStartupTransition(const std::string & message)
 {
   if ("info" == startupLogLevel_) {
@@ -813,11 +903,63 @@ void RoamadomeControl::logStartupTransition(const std::string & message)
   }
 }
 
+void RoamadomeControl::ensureParameterCallbackRegistered(const rclcpp::Node::SharedPtr & node)
+{
+  if (!node || paramCallbackHandle_) {
+    return;
+  }
+
+  // Register callback as soon as device parameters exist. This guarantees
+  // configure->activate writes are validated/rejected deterministically.
+  paramCallbackHandle_ = node->add_on_set_parameters_callback(
+    std::bind(&RoamadomeControl::onParameterChange, this, std::placeholders::_1));
+}
+
 hardware_interface::CallbackReturn RoamadomeControl::on_activate(
   const rclcpp_lifecycle::State & previous_state)
 {
   RCLCPP_INFO(logger_, "Activating RoamadomeControl from state: %s",
       previous_state.label().c_str());
+
+  auto node = get_node();
+  if (!node) {
+    RCLCPP_ERROR(logger_, "Cannot activate RoamadomeControl: lifecycle node is null");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  ensureParameterCallbackRegistered(node);
+
+  if (!setupService_) {
+    setupService_ = node->create_service<std_srvs::srv::Trigger>(
+      "~/setup",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>/* request */,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        if (!serialHandler_ || !serialHandler_->isOpen()) {
+          response->success = false;
+          response->message = "hardware interface is unavailable; command not queued";
+          RCLCPP_WARN(logger_, "Setup service called while serial interface is unavailable");
+          return;
+        }
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+        sendQueue_.push({"setup", "#DPSETUP", RoamadomeControl::SendQueueCommand::Flow::ONE_SHOT,
+          false});
+        response->success = true;
+        response->message = "Setup command queued";
+        RCLCPP_INFO(logger_, "Setup service called, #DPSETUP will be sent in next write cycle");
+      });
+  }
+
+  if (!periodicConfigTimer_) {
+    periodicConfigTimer_ = node->create_wall_timer(
+      std::chrono::milliseconds(configRefreshIntervalMs_),
+      [this]() {
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+        enqueueConfigDumpWithInvalidLocked("periodic refresh");
+      });
+  }
+
+  lifecycleActive_.store(true);
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -830,6 +972,27 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
 
   RCLCPP_INFO(logger_, "Deactivating RoamadomeControl from state: %s",
       previous_state.label().c_str());
+
+  lifecycleActive_.store(false);
+
+  setupService_.reset();
+  // Keep the callback registered across deactivate so device.* writes continue
+  // to be validated/rejected deterministically while hardware is inactive.
+
+  if (periodicConfigTimer_) {
+    periodicConfigTimer_->cancel();
+    periodicConfigTimer_.reset();
+  }
+
+  // Reset the send queue and related state to ensure a clean slate on next activation.
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    while (!sendQueue_.empty()) {
+      sendQueue_.pop();
+    }
+    sendQueueCommandActive_ = false;
+    sendQueueStage_ = SendQueueStage::IDLE;
+  }
 
   if (serialHandler_) {
     serialHandler_->sendCommand("#DPREPORT0");
@@ -888,6 +1051,65 @@ hardware_interface::return_type RoamadomeControl::write(
 
   if (!serialHandler_ || !serialHandler_->isOpen()) {
     return return_type::OK;
+  }
+
+  std::optional<SendQueueCommand> queued_command;
+
+  // Process queue bookkeeping under lock.
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    const auto now = std::chrono::steady_clock::now();
+
+    if (sendQueueCommandActive_) {
+      const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - sendQueueStageStartTime_).count();
+
+      if ((SendQueueStage::WAIT_WRITE_SETTINGS == sendQueueStage_ ||
+        SendQueueStage::WAIT_UPDATED == sendQueueStage_) &&
+        elapsed_ms > sendQueueAckTimeoutMs_)
+      {
+        RCLCPP_WARN(logger_,
+          "Timed out waiting for ack stage (%d) for %s after %lld ms",
+          static_cast<int>(sendQueueStage_), activeSendQueueCommand_.label.c_str(),
+          static_cast<long long>(elapsed_ms));
+        sendQueueCommandActive_ = false;
+        sendQueueStage_ = SendQueueStage::IDLE;
+      }
+    }
+
+    if (!sendQueueCommandActive_ && !sendQueue_.empty()) {
+      queued_command = sendQueue_.front();
+      sendQueue_.pop();
+    }
+  }
+
+  // Execute serial I/O outside sendQueue_mutex_ to avoid stalling queue producers/consumers.
+  if (queued_command.has_value()) {
+    const SendQueueCommand & command = *queued_command;
+
+    if (SendQueueCommand::Flow::ONE_SHOT == command.flow) {
+      if (!serialHandler_->sendCommand(command.command)) {
+        RCLCPP_WARN(logger_, "Failed one-shot command '%s' (%s)",
+          command.command.c_str(), command.label.c_str());
+      } else {
+        RCLCPP_DEBUG(logger_, "Sent one-shot command '%s' (%s)",
+          command.command.c_str(), command.label.c_str());
+      }
+    } else if (serialHandler_->sendCommand(command.command)) {
+      {
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+        activeSendQueueCommand_ = command;
+        sendQueueCommandActive_ = true;
+        sendQueueStage_ = SendQueueStage::WAIT_WRITE_SETTINGS;
+        sendQueueStageStartTime_ = std::chrono::steady_clock::now();
+      }
+
+      RCLCPP_INFO(logger_, "Sent ack-tracked command '%s' (%s)",
+        command.command.c_str(), command.label.c_str());
+    } else {
+      RCLCPP_WARN(logger_, "Failed ack-tracked command '%s' (%s)",
+        command.command.c_str(), command.label.c_str());
+    }
   }
 
   // Determine which command mode is active and send appropriate command
@@ -1054,6 +1276,171 @@ bool RoamadomeControl::sendStopCommand()
 
   // Send stop command: :DPR0 (0% velocity)
   return serialHandler_->sendCommand(":DPR0");
+}
+
+void RoamadomeControl::declareDeviceParameters()
+{
+  auto node = get_node();
+  if (!node) {
+    RCLCPP_ERROR(logger_, "Failed to get node for parameter declaration");
+    return;
+  }
+
+  // All device parameters — skip already-declared ones to survive re-configure
+  for (const auto * spec : deviceParameterRegistry_.allSpecs()) {
+    if (!node->has_parameter(spec->fullName())) {
+      spec->declareParameter(node);
+    }
+  }
+
+  // Register mutability policy callback at parameter declaration time so
+  // configure->activate writes are not accepted without validation.
+  ensureParameterCallbackRegistered(node);
+
+  RCLCPP_INFO(logger_, "Device parameters declared");
+}
+
+std::vector<rclcpp::Parameter> RoamadomeControl::filterChangedParameters(
+  const rclcpp::Node::SharedPtr & node,
+  const std::vector<rclcpp::Parameter> & desired_parameters)
+{
+  std::vector<rclcpp::Parameter> changed_parameters;
+  changed_parameters.reserve(desired_parameters.size());
+  for (const auto & desired_parameter : desired_parameters) {
+    rclcpp::Parameter current_parameter;
+    if (!node->get_parameter(desired_parameter.get_name(), current_parameter) ||
+      !parameterValuesMatch(current_parameter, desired_parameter))
+    {
+      changed_parameters.push_back(desired_parameter);
+    }
+  }
+
+  return changed_parameters;
+}
+
+void RoamadomeControl::updateParametersFromDevice()
+{
+  auto node = get_node();
+  if (!node) {
+    RCLCPP_ERROR(logger_, "Failed to get node for parameter update");
+    return;
+  }
+
+  if (!node->has_parameter("device.home_pos")) {
+    RCLCPP_DEBUG(logger_, "Device parameters not declared yet; skipping config-to-parameter sync");
+    return;
+  }
+
+  std::vector<rclcpp::Parameter> params_to_set;
+  {
+    std::lock_guard<std::mutex> lock(deviceParameterRegistry_mutex_);
+    params_to_set = deviceParameterRegistry_.currentParameters();
+  }
+
+  const std::vector<rclcpp::Parameter> changed_params = filterChangedParameters(node,
+      params_to_set);
+
+  if (changed_params.empty()) {
+    RCLCPP_DEBUG(logger_, "Device->ROS parameter sync skipped: no changed values");
+    return;
+  }
+
+  ScopedParameterSyncCallbackBypass sync_guard;
+
+  auto results = node->set_parameters(changed_params);
+
+  size_t success_count = 0;
+  for (const auto & result : results) {
+    if (result.successful) {
+      success_count++;
+    }
+  }
+
+  RCLCPP_DEBUG(logger_,
+      "Device->ROS parameter sync complete: updated %zu/%zu parameters", success_count,
+      results.size());
+}
+
+rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
+  const std::vector<rclcpp::Parameter> & parameters)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+
+  if (parameterSyncCallbackBypass()) {
+    RCLCPP_DEBUG(logger_,
+      "Ignoring %zu parameter callback entries triggered by device->ROS sync",
+      parameters.size());
+    return result;
+  }
+
+  RCLCPP_DEBUG(logger_, "Processing %zu parameter callback entries", parameters.size());
+
+  std::vector<SendQueueCommand> validated_commands;
+  validated_commands.reserve(parameters.size());
+
+  for (const auto & param : parameters) {
+    const std::string & name = param.get_name();
+
+    // Only handle device.* parameters; user writes to non-writable fields are
+    // rejected below. Internal sync updates bypass this callback with a
+    // thread-local guard around updateParametersFromDevice().
+    if (name.find("device.") != 0) {
+      continue;  // Not a device parameter, ignore
+    }
+
+    // Extract field name
+    std::string field_name = name.substr(7);  // Remove "device." prefix
+    const WritableParameterSpecBase * spec = deviceParameterRegistry_.findWritableParameterSpec(
+      field_name);
+    if (nullptr == spec) {
+      result.successful = false;
+      result.reason = "device parameter " + name + " is read-only and updated from device config";
+      return result;
+    }
+
+    if (!lifecycleActive_.load()) {
+      result.successful = false;
+      result.reason = "cannot update device parameter " + name +
+        ": hardware interface is inactive";
+      return result;
+    }
+
+    if (!serialHandler_ || !serialHandler_->isOpen()) {
+      result.successful = false;
+      result.reason = "cannot update device parameter " + name +
+        ": hardware interface is not active";
+      return result;
+    }
+
+    std::string command;
+    std::string reason;
+    if (!spec->validateAndBuildCommand(param, &command, &reason)) {
+      result.successful = false;
+      result.reason = reason;
+      return result;
+    }
+
+    RCLCPP_DEBUG(logger_, "Validated %s, command=%s", name.c_str(), command.c_str());
+
+    validated_commands.push_back({
+        name,
+        command,
+        SendQueueCommand::Flow::PARAMETER_UPDATE_ACK,
+        true
+    });
+  }
+
+  if (!validated_commands.empty()) {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    for (const auto & send_command : validated_commands) {
+      sendQueue_.push(send_command);
+      RCLCPP_INFO(logger_, "Queued parameter update: %s (queue depth=%zu)",
+        send_command.label.c_str(), sendQueue_.size());
+    }
+  }
+
+  return result;
 }
 
 }  // namespace ros2_roamadome
