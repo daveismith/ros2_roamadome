@@ -282,24 +282,50 @@ bool parseConfigScalar(
 
   try {
     size_t parse_end = 0;
-    const unsigned long long parsed = std::stoull(value_str, &parse_end);
-    if (parse_end != value_str.size()) {
-      RCLCPP_WARN(
-        logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
-      return false;
-    }
 
-    if (parsed < static_cast<unsigned long long>(min_value) ||
-      parsed > static_cast<unsigned long long>(max_value))
-    {
-      RCLCPP_WARN(
-        logger, "Value %s out of range [%lld, %lld] for %s", value_str.c_str(),
-        static_cast<long long>(min_value), static_cast<long long>(max_value), field_name.c_str());
-      return false;
-    }
+    if constexpr (std::is_signed_v<TValue>) {
+      const long long parsed = std::stoll(value_str, &parse_end);
+      if (parse_end != value_str.size()) {
+        RCLCPP_WARN(
+          logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
+        return false;
+      }
 
-    *output = static_cast<TValue>(parsed);
-    return true;
+      const long long min_ll = static_cast<long long>(min_value);
+      const long long max_ll = static_cast<long long>(max_value);
+
+      if (parsed < min_ll || parsed > max_ll) {
+        RCLCPP_WARN(
+          logger, "Value %s out of range [%lld, %lld] for %s", value_str.c_str(),
+          static_cast<long long>(min_value), static_cast<long long>(max_value),
+          field_name.c_str());
+        return false;
+      }
+
+      *output = static_cast<TValue>(parsed);
+      return true;
+    } else {
+      const unsigned long long parsed = std::stoull(value_str, &parse_end);
+      if (parse_end != value_str.size()) {
+        RCLCPP_WARN(
+          logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
+        return false;
+      }
+
+      const unsigned long long min_ull = static_cast<unsigned long long>(min_value);
+      const unsigned long long max_ull = static_cast<unsigned long long>(max_value);
+
+      if (parsed < min_ull || parsed > max_ull) {
+        RCLCPP_WARN(
+          logger, "Value %s out of range [%llu, %llu] for %s", value_str.c_str(),
+          static_cast<unsigned long long>(min_value), static_cast<unsigned long long>(max_value),
+          field_name.c_str());
+        return false;
+      }
+
+      *output = static_cast<TValue>(parsed);
+      return true;
+    }
   } catch (const std::exception & ex) {
     RCLCPP_WARN(
       logger, "Failed to parse numeric value for %s ('%s'): %s", field_name.c_str(),
