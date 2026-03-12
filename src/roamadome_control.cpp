@@ -90,6 +90,26 @@ std::string buildTransitionLambdaFailure(const std::string & reason)
   return stream.str();
 }
 
+bool & parameterSyncCallbackBypass()
+{
+  static thread_local bool bypass = false;
+  return bypass;
+}
+
+class ScopedParameterSyncCallbackBypass
+{
+public:
+  ScopedParameterSyncCallbackBypass()
+  {
+    parameterSyncCallbackBypass() = true;
+  }
+
+  ~ScopedParameterSyncCallbackBypass()
+  {
+    parameterSyncCallbackBypass() = false;
+  }
+};
+
 }  // namespace
 
 RoamadomeControl::RoamadomeControl()
@@ -881,6 +901,18 @@ void RoamadomeControl::logStartupTransition(const std::string & message)
   }
 }
 
+void RoamadomeControl::ensureParameterCallbackRegistered(const rclcpp::Node::SharedPtr & node)
+{
+  if (!node || paramCallbackHandle_) {
+    return;
+  }
+
+  // Register callback as soon as device parameters exist. This guarantees
+  // configure->activate writes are validated/rejected deterministically.
+  paramCallbackHandle_ = node->add_on_set_parameters_callback(
+    std::bind(&RoamadomeControl::onParameterChange, this, std::placeholders::_1));
+}
+
 hardware_interface::CallbackReturn RoamadomeControl::on_activate(
   const rclcpp_lifecycle::State & previous_state)
 {
@@ -893,13 +925,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  if (!paramCallbackHandle_) {
-    // Device parameters are descriptor-writable to allow internal
-    // Device->ROS synchronization via set_parameters(); user mutability is
-    // enforced here by rejecting non-writable device.* updates.
-    paramCallbackHandle_ = node->add_on_set_parameters_callback(
-      std::bind(&RoamadomeControl::onParameterChange, this, std::placeholders::_1));
-  }
+  ensureParameterCallbackRegistered(node);
 
   if (!setupService_) {
     setupService_ = node->create_service<std_srvs::srv::Trigger>(
@@ -944,7 +970,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
       previous_state.label().c_str());
 
   setupService_.reset();
-  paramCallbackHandle_.reset();
+  // Keep the callback registered across deactivate so device.* writes continue
+  // to be validated/rejected deterministically while hardware is inactive.
 
   if (periodicConfigTimer_) {
     periodicConfigTimer_->cancel();
@@ -1020,7 +1047,9 @@ hardware_interface::return_type RoamadomeControl::write(
     return return_type::OK;
   }
 
-  // Process queued commands
+  std::optional<SendQueueCommand> queued_command;
+
+  // Process queue bookkeeping under lock.
   {
     std::lock_guard<std::mutex> lock(sendQueue_mutex_);
     const auto now = std::chrono::steady_clock::now();
@@ -1043,28 +1072,37 @@ hardware_interface::return_type RoamadomeControl::write(
     }
 
     if (!sendQueueCommandActive_ && !sendQueue_.empty()) {
-      SendQueueCommand command = sendQueue_.front();
+      queued_command = sendQueue_.front();
       sendQueue_.pop();
+    }
+  }
 
-      if (SendQueueCommand::Flow::ONE_SHOT == command.flow) {
-        if (!serialHandler_->sendCommand(command.command)) {
-          RCLCPP_WARN(logger_, "Failed one-shot command '%s' (%s)",
-            command.command.c_str(), command.label.c_str());
-        } else {
-          RCLCPP_DEBUG(logger_, "Sent one-shot command '%s' (%s)",
-            command.command.c_str(), command.label.c_str());
-        }
-      } else if (serialHandler_->sendCommand(command.command)) {
+  // Execute serial I/O outside sendQueue_mutex_ to avoid stalling queue producers/consumers.
+  if (queued_command.has_value()) {
+    const SendQueueCommand & command = *queued_command;
+
+    if (SendQueueCommand::Flow::ONE_SHOT == command.flow) {
+      if (!serialHandler_->sendCommand(command.command)) {
+        RCLCPP_WARN(logger_, "Failed one-shot command '%s' (%s)",
+          command.command.c_str(), command.label.c_str());
+      } else {
+        RCLCPP_DEBUG(logger_, "Sent one-shot command '%s' (%s)",
+          command.command.c_str(), command.label.c_str());
+      }
+    } else if (serialHandler_->sendCommand(command.command)) {
+      {
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
         activeSendQueueCommand_ = command;
         sendQueueCommandActive_ = true;
         sendQueueStage_ = SendQueueStage::WAIT_WRITE_SETTINGS;
-        sendQueueStageStartTime_ = now;
-        RCLCPP_INFO(logger_, "Sent ack-tracked command '%s' (%s)",
-          command.command.c_str(), command.label.c_str());
-      } else {
-        RCLCPP_WARN(logger_, "Failed ack-tracked command '%s' (%s)",
-          command.command.c_str(), command.label.c_str());
+        sendQueueStageStartTime_ = std::chrono::steady_clock::now();
       }
+
+      RCLCPP_INFO(logger_, "Sent ack-tracked command '%s' (%s)",
+        command.command.c_str(), command.label.c_str());
+    } else {
+      RCLCPP_WARN(logger_, "Failed ack-tracked command '%s' (%s)",
+        command.command.c_str(), command.label.c_str());
     }
   }
 
@@ -1249,6 +1287,10 @@ void RoamadomeControl::declareDeviceParameters()
     }
   }
 
+  // Register mutability policy callback at parameter declaration time so
+  // configure->activate writes are not accepted without validation.
+  ensureParameterCallbackRegistered(node);
+
   RCLCPP_INFO(logger_, "Device parameters declared");
 }
 
@@ -1297,19 +1339,7 @@ void RoamadomeControl::updateParametersFromDevice()
     return;
   }
 
-  struct SyncGuard
-  {
-    explicit SyncGuard(std::atomic<bool> * flag)
-    : flag_(flag)
-    {
-      flag_->store(true);
-    }
-    ~SyncGuard()
-    {
-      flag_->store(false);
-    }
-    std::atomic<bool> * flag_;
-  } sync_guard(&parameterSyncInProgress_);
+  ScopedParameterSyncCallbackBypass sync_guard;
 
   auto results = node->set_parameters(changed_params);
 
@@ -1331,7 +1361,7 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
 
-  if (parameterSyncInProgress_.load()) {
+  if (parameterSyncCallbackBypass()) {
     RCLCPP_DEBUG(logger_,
       "Ignoring %zu parameter callback entries triggered by device->ROS sync",
       parameters.size());
@@ -1344,8 +1374,8 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
     const std::string & name = param.get_name();
 
     // Only handle device.* parameters; user writes to non-writable fields are
-    // rejected below. Internal sync updates bypass this callback via
-    // parameterSyncInProgress_.
+    // rejected below. Internal sync updates bypass this callback with a
+    // thread-local guard around updateParametersFromDevice().
     if (name.find("device.") != 0) {
       continue;  // Not a device parameter, ignore
     }

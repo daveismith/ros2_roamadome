@@ -14,7 +14,6 @@
 #include <cctype>
 #include <chrono>
 #include <array>
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -180,6 +179,7 @@ private:
   bool sendStopCommand();
 
   // Parameter management methods
+  void ensureParameterCallbackRegistered(const rclcpp::Node::SharedPtr & node);
   void declareDeviceParameters();
   static std::vector<rclcpp::Parameter> filterChangedParameters(
     const rclcpp::Node::SharedPtr & node,
@@ -271,7 +271,6 @@ private:
   SendQueueStage sendQueueStage_ = SendQueueStage::IDLE;
   std::chrono::steady_clock::time_point sendQueueStageStartTime_;
   uint32_t sendQueueAckTimeoutMs_ = 3000;
-  std::atomic<bool> parameterSyncInProgress_{false};
   uint32_t configRefreshIntervalMs_ = 60000;  // Default 60 seconds
   rclcpp::TimerBase::SharedPtr periodicConfigTimer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr paramCallbackHandle_;
