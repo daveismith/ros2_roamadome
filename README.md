@@ -258,6 +258,8 @@ Parameter update behavior:
 - After update ack, a config refresh (`#DPCONFIG` + `#DPINVALID`) is queued to synchronize all `device.*` values.
 - Device-to-ROS synchronization uses a thread-local callback bypass guard to avoid callback loops
   without dropping concurrent external writes from other threads.
+- Firmware config parsing accepts `SetupAngularVelocity` values as plain numbers (for example,
+  `100`) or with an optional `cm/s` suffix (for example, `100 cm/s`).
 
 ### Parameter Mutability Test Plan
 

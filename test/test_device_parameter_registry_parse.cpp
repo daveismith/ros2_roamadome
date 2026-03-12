@@ -174,4 +174,47 @@ TEST(DeviceParameterRegistryParseTest, Parse_AllConfigFieldsRoundTripIntoRegistr
   EXPECT_EQ(findSpecByConfigKey(registry, "DOut")->currentParameter().as_int(), 12);
 }
 
+TEST(DeviceParameterRegistryParseTest, Parse_SetupAngularVelocity_AcceptsCmPerSecSuffix)
+{
+  const std::map<std::string, std::string> config_map = {
+    {"SetupAngularVelocity", "100 cm/s"}
+  };
+
+  const auto logger = rclcpp::get_logger("config_parser_test");
+  DeviceParameterRegistry registry;
+  ASSERT_TRUE(registry.parseConfigMap(config_map, logger));
+
+  EXPECT_EQ(findSpecByConfigKey(registry, "SetupAngularVelocity")->currentParameter().as_int(),
+    100);
+}
+
+TEST(DeviceParameterRegistryParseTest, Parse_SetupAngularVelocity_RejectsUnknownUnitSuffix)
+{
+  const std::map<std::string, std::string> config_map = {
+    {"SetupAngularVelocity", "100 rpm"}
+  };
+
+  const auto logger = rclcpp::get_logger("config_parser_test");
+  DeviceParameterRegistry registry;
+  ASSERT_FALSE(registry.parseConfigMap(config_map, logger));
+
+  // Value remains default on parse failure.
+  EXPECT_EQ(findSpecByConfigKey(registry, "SetupAngularVelocity")->currentParameter().as_int(),
+    100);
+}
+
+TEST(DeviceParameterRegistryParseTest, Parse_NonSetupNumericField_StillRejectsUnitSuffix)
+{
+  const std::map<std::string, std::string> config_map = {
+    {"AutoLeft", "90 deg"}
+  };
+
+  const auto logger = rclcpp::get_logger("config_parser_test");
+  DeviceParameterRegistry registry;
+  ASSERT_FALSE(registry.parseConfigMap(config_map, logger));
+
+  // Value remains default on parse failure.
+  EXPECT_EQ(findSpecByConfigKey(registry, "AutoLeft")->currentParameter().as_int(), 80);
+}
+
 }  // namespace ros2_roamadome

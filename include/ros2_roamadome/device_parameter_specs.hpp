@@ -4,6 +4,7 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include <cstdint>
+#include <cctype>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -266,12 +267,62 @@ bool parseConfigScalar(
   const rclcpp::Logger & logger,
   const std::string & field_name)
 {
+  auto trimCopy = [](const std::string & input) -> std::string {
+      size_t begin = 0;
+      while (begin < input.size() && std::isspace(static_cast<unsigned char>(input[begin]))) {
+        ++begin;
+      }
+
+      size_t end = input.size();
+      while (end > begin && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
+        --end;
+      }
+
+      return input.substr(begin, end - begin);
+    };
+
+  auto toLowerCopy = [](std::string text) -> std::string {
+      for (char & c : text) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+      return text;
+    };
+
+  auto allowSetupAngularVelocityUnitSuffix = [&field_name, &trimCopy, &toLowerCopy](
+    const std::string & suffix,
+    const rclcpp::Logger & log,
+    const std::string & original_value) -> bool {
+      if ("SetupAngularVelocity" != field_name) {
+        return false;
+      }
+
+      const std::string trimmed_suffix = trimCopy(suffix);
+      if (trimmed_suffix.empty()) {
+        return true;
+      }
+
+      const std::string lowered_suffix = toLowerCopy(trimmed_suffix);
+      if ("cm/s" == lowered_suffix) {
+        return true;
+      }
+
+      RCLCPP_WARN(
+        log,
+        "Invalid unit suffix for %s: '%s' in value '%s' (expected optional 'cm/s')",
+        field_name.c_str(),
+        trimmed_suffix.c_str(),
+        original_value.c_str());
+      return false;
+    };
+
+  const std::string trimmed_value = trimCopy(value_str);
+
   if constexpr (std::is_same<TValue, bool>::value) {
-    if (value_str == "0" || value_str == "false" || value_str == "False") {
+    if (trimmed_value == "0" || trimmed_value == "false" || trimmed_value == "False") {
       *output = false;
       return true;
     }
-    if (value_str == "1" || value_str == "true" || value_str == "True") {
+    if (trimmed_value == "1" || trimmed_value == "true" || trimmed_value == "True") {
       *output = true;
       return true;
     }
@@ -284,10 +335,13 @@ bool parseConfigScalar(
     size_t parse_end = 0;
 
     if constexpr (std::is_signed_v<TValue>) {
-      const long long parsed = std::stoll(value_str, &parse_end);
-      if (parse_end != value_str.size()) {
-        RCLCPP_WARN(
-          logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
+      const long long parsed = std::stoll(trimmed_value, &parse_end);
+      if (parse_end != trimmed_value.size() &&
+        !allowSetupAngularVelocityUnitSuffix(
+          trimmed_value.substr(parse_end), logger, value_str))
+      {
+        RCLCPP_WARN(logger, "Invalid numeric value for %s: '%s'", field_name.c_str(),
+          value_str.c_str());
         return false;
       }
 
@@ -305,10 +359,13 @@ bool parseConfigScalar(
       *output = static_cast<TValue>(parsed);
       return true;
     } else {
-      const unsigned long long parsed = std::stoull(value_str, &parse_end);
-      if (parse_end != value_str.size()) {
-        RCLCPP_WARN(
-          logger, "Invalid numeric value for %s: '%s'", field_name.c_str(), value_str.c_str());
+      const unsigned long long parsed = std::stoull(trimmed_value, &parse_end);
+      if (parse_end != trimmed_value.size() &&
+        !allowSetupAngularVelocityUnitSuffix(
+          trimmed_value.substr(parse_end), logger, value_str))
+      {
+        RCLCPP_WARN(logger, "Invalid numeric value for %s: '%s'", field_name.c_str(),
+          value_str.c_str());
         return false;
       }
 
