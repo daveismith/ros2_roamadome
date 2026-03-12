@@ -11,6 +11,7 @@
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <array>
@@ -269,6 +270,7 @@ private:
   bool sendQueueCommandActive_ = false;
   SendQueueCommand activeSendQueueCommand_;
   SendQueueStage sendQueueStage_ = SendQueueStage::IDLE;
+  std::atomic<bool> lifecycleActive_{false};
   std::chrono::steady_clock::time_point sendQueueStageStartTime_;
   uint32_t sendQueueAckTimeoutMs_ = 3000;
   uint32_t configRefreshIntervalMs_ = 60000;  // Default 60 seconds
@@ -312,9 +314,10 @@ public:
 
     void onConfigUpdate(const std::map<std::string, std::string> & config) override
     {
+      bool parsed_cleanly = false;
       {
         std::lock_guard<std::mutex> lock(controller_->deviceParameterRegistry_mutex_);
-        const bool parsed_cleanly = controller_->deviceParameterRegistry_.parseConfigMap(
+        parsed_cleanly = controller_->deviceParameterRegistry_.parseConfigMap(
           config, controller_->logger_);
         if (!parsed_cleanly) {
           RCLCPP_WARN(controller_->logger_,
@@ -322,7 +325,12 @@ public:
         }
       }
 
-      controller_->updateParametersFromDevice();
+      if (parsed_cleanly) {
+        controller_->updateParametersFromDevice();
+      } else {
+        RCLCPP_WARN(controller_->logger_,
+          "Skipping device->ROS parameter sync because configuration parse was not clean");
+      }
 
       // Also update startup context for startup state machine
       {

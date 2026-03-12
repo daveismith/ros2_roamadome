@@ -94,6 +94,11 @@ protected:
     return RoamadomeControl::filterChangedParameters(node, desired_parameters);
   }
 
+  void setLifecycleActiveForTest(bool active)
+  {
+    controller_->lifecycleActive_.store(active);
+  }
+
   std::unique_ptr<RoamadomeControl> controller_;
 };
 
@@ -400,7 +405,7 @@ TEST_F(RoamadomeControlTest, OnParameterChange_WritableParameterRequiresActiveHa
     {rclcpp::Parameter("device.auto_mode", true)});
 
   EXPECT_FALSE(result.successful);
-  EXPECT_NE(result.reason.find("hardware interface is not active"), std::string::npos);
+  EXPECT_NE(result.reason.find("hardware interface is inactive"), std::string::npos);
 }
 
 TEST_F(RoamadomeControlTest, OnParameterChange_IgnoresNonDeviceParameter)
@@ -1672,6 +1677,10 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_ParameterUpdateAck_TriggersConfigRefre
   ASSERT_EQ(
     controller_->on_configure(previous_state),
     hardware_interface::CallbackReturn::SUCCESS);
+
+  // Unit tests for this class run without a lifecycle node, so mark the
+  // controller active via the fixture helper to exercise writable updates.
+  setLifecycleActiveForTest(true);
 
   {
     std::lock_guard<std::mutex> lock(commands_mutex);

@@ -309,6 +309,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
 hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   const rclcpp_lifecycle::State & previous_state)
 {
+  lifecycleActive_.store(false);
+
   if (0 == info_.rw_rate) {
     RCLCPP_ERROR(logger_, "Invalid rw_rate: 0");
     return hardware_interface::CallbackReturn::ERROR;
@@ -956,6 +958,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
       });
   }
 
+  lifecycleActive_.store(true);
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -968,6 +972,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
 
   RCLCPP_INFO(logger_, "Deactivating RoamadomeControl from state: %s",
       previous_state.label().c_str());
+
+  lifecycleActive_.store(false);
 
   setupService_.reset();
   // Keep the callback registered across deactivate so device.* writes continue
@@ -1370,6 +1376,9 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
 
   RCLCPP_DEBUG(logger_, "Processing %zu parameter callback entries", parameters.size());
 
+  std::vector<SendQueueCommand> validated_commands;
+  validated_commands.reserve(parameters.size());
+
   for (const auto & param : parameters) {
     const std::string & name = param.get_name();
 
@@ -1390,6 +1399,13 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
       return result;
     }
 
+    if (!lifecycleActive_.load()) {
+      result.successful = false;
+      result.reason = "cannot update device parameter " + name +
+        ": hardware interface is inactive";
+      return result;
+    }
+
     if (!serialHandler_ || !serialHandler_->isOpen()) {
       result.successful = false;
       result.reason = "cannot update device parameter " + name +
@@ -1407,16 +1423,20 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
 
     RCLCPP_DEBUG(logger_, "Validated %s, command=%s", name.c_str(), command.c_str());
 
-    {
-      std::lock_guard<std::mutex> lock(sendQueue_mutex_);
-      sendQueue_.push({
-          name,
-          command,
-          SendQueueCommand::Flow::PARAMETER_UPDATE_ACK,
-          true
-        });
+    validated_commands.push_back({
+        name,
+        command,
+        SendQueueCommand::Flow::PARAMETER_UPDATE_ACK,
+        true
+    });
+  }
+
+  if (!validated_commands.empty()) {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    for (const auto & send_command : validated_commands) {
+      sendQueue_.push(send_command);
       RCLCPP_INFO(logger_, "Queued parameter update: %s (queue depth=%zu)",
-        name.c_str(), sendQueue_.size());
+        send_command.label.c_str(), sendQueue_.size());
     }
   }
 
