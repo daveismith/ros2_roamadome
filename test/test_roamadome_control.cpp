@@ -1646,6 +1646,8 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_ParameterUpdateAck_TriggersConfigRefre
   ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
 
   ASSERT_TRUE(wait_for_command("#DPCONFIG", 500));
+
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
   ASSERT_TRUE(wait_for_command("#DPINVALID", 500));
 
 }

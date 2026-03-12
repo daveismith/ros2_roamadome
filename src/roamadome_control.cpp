@@ -940,6 +940,15 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
     periodicConfigTimer_.reset();
   }
 
+  // Reset the send queue and related state to ensure a clean slate on next activation.
+  sendQueue_mutex_.lock();
+  while (!sendQueue_.empty()) {
+    sendQueue_.pop();
+  }
+  sendQueueCommandActive_ = false;
+  sendQueueStage_ = SendQueueStage::IDLE;
+  sendQueue_mutex_.unlock();
+
   if (serialHandler_) {
     serialHandler_->sendCommand("#DPREPORT0");
     nanosleep(&ts, NULL);
@@ -1021,7 +1030,7 @@ hardware_interface::return_type RoamadomeControl::write(
       }
     }
 
-    while (!sendQueueCommandActive_ && !sendQueue_.empty()) {
+    if (!sendQueueCommandActive_ && !sendQueue_.empty()) {
       SendQueueCommand command = sendQueue_.front();
       sendQueue_.pop();
 
@@ -1033,10 +1042,8 @@ hardware_interface::return_type RoamadomeControl::write(
           RCLCPP_DEBUG(logger_, "Sent one-shot command '%s' (%s)",
             command.command.c_str(), command.label.c_str());
         }
-        continue;
-      }
-
-      if (serialHandler_->sendCommand(command.command)) {
+        //continue;
+      } else if (serialHandler_->sendCommand(command.command)) {
         activeSendQueueCommand_ = command;
         sendQueueCommandActive_ = true;
         sendQueueStage_ = SendQueueStage::WAIT_WRITE_SETTINGS;
