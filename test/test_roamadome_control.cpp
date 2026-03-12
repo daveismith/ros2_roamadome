@@ -87,6 +87,13 @@ protected:
     return controller_->onParameterChange(parameters);
   }
 
+  std::vector<rclcpp::Parameter> filterChangedParametersForTest(
+    const rclcpp::Node::SharedPtr & node,
+    const std::vector<rclcpp::Parameter> & desired_parameters)
+  {
+    return RoamadomeControl::filterChangedParameters(node, desired_parameters);
+  }
+
   std::unique_ptr<RoamadomeControl> controller_;
 };
 
@@ -329,6 +336,53 @@ TEST_F(RoamadomeControlTest, ExportCommandInterfaces_DynamicJointName)
   EXPECT_EQ(command_interfaces[1].get_interface_name(), "velocity");
   EXPECT_EQ(command_interfaces[0].get_prefix_name(), info.joints[0].name);
   EXPECT_EQ(command_interfaces[1].get_prefix_name(), info.joints[0].name);
+}
+
+TEST_F(RoamadomeControlTest, DeviceParameterSync_SkipsUnchangedSnapshots)
+{
+  if (!rclcpp::ok()) {
+    int argc = 0;
+    char ** argv = nullptr;
+    rclcpp::init(argc, argv);
+  }
+
+  auto node = std::make_shared<rclcpp::Node>("device_parameter_sync_test");
+  node->declare_parameter("device.auto_mode", false);
+  node->declare_parameter("device.home_mode", false);
+
+  const std::vector<rclcpp::Parameter> initial_snapshot = {
+    rclcpp::Parameter("device.auto_mode", true),
+    rclcpp::Parameter("device.home_mode", false)
+  };
+  const auto first_changed = filterChangedParametersForTest(node, initial_snapshot);
+  ASSERT_EQ(first_changed.size(), 1u);
+  EXPECT_EQ(first_changed[0].get_name(), "device.auto_mode");
+
+  auto first_results = node->set_parameters(first_changed);
+  ASSERT_EQ(first_results.size(), 1u);
+  EXPECT_TRUE(first_results[0].successful);
+
+  const auto unchanged = filterChangedParametersForTest(node, initial_snapshot);
+  EXPECT_TRUE(unchanged.empty());
+
+  const std::vector<rclcpp::Parameter> updated_snapshot = {
+    rclcpp::Parameter("device.auto_mode", true),
+    rclcpp::Parameter("device.home_mode", true)
+  };
+  const auto second_changed = filterChangedParametersForTest(node, updated_snapshot);
+  ASSERT_EQ(second_changed.size(), 1u);
+  EXPECT_EQ(second_changed[0].get_name(), "device.home_mode");
+
+  auto second_results = node->set_parameters(second_changed);
+  ASSERT_EQ(second_results.size(), 1u);
+  EXPECT_TRUE(second_results[0].successful);
+
+  bool auto_mode = false;
+  bool home_mode = false;
+  ASSERT_TRUE(node->get_parameter("device.auto_mode", auto_mode));
+  ASSERT_TRUE(node->get_parameter("device.home_mode", home_mode));
+  EXPECT_TRUE(auto_mode);
+  EXPECT_TRUE(home_mode);
 }
 
 /**

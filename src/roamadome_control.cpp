@@ -23,6 +23,14 @@ namespace ros2_roamadome
 namespace
 {
 
+bool parameterValuesMatch(
+  const rclcpp::Parameter & current_parameter,
+  const rclcpp::Parameter & desired_parameter)
+{
+  return current_parameter.get_type() == desired_parameter.get_type() &&
+         current_parameter.get_parameter_value() == desired_parameter.get_parameter_value();
+}
+
 bool matchesInterfaceName(const std::string & interface_name, std::string_view expected_name)
 {
   const size_t separator_pos = interface_name.rfind('/');
@@ -1241,6 +1249,24 @@ void RoamadomeControl::declareDeviceParameters()
   RCLCPP_INFO(logger_, "Device parameters declared");
 }
 
+std::vector<rclcpp::Parameter> RoamadomeControl::filterChangedParameters(
+  const rclcpp::Node::SharedPtr & node,
+  const std::vector<rclcpp::Parameter> & desired_parameters)
+{
+  std::vector<rclcpp::Parameter> changed_parameters;
+  changed_parameters.reserve(desired_parameters.size());
+  for (const auto & desired_parameter : desired_parameters) {
+    rclcpp::Parameter current_parameter;
+    if (!node->get_parameter(desired_parameter.get_name(), current_parameter) ||
+      !parameterValuesMatch(current_parameter, desired_parameter))
+    {
+      changed_parameters.push_back(desired_parameter);
+    }
+  }
+
+  return changed_parameters;
+}
+
 void RoamadomeControl::updateParametersFromDevice()
 {
   auto node = get_node();
@@ -1260,6 +1286,14 @@ void RoamadomeControl::updateParametersFromDevice()
     params_to_set = deviceParameterRegistry_.currentParameters();
   }
 
+  const std::vector<rclcpp::Parameter> changed_params = filterChangedParameters(node,
+      params_to_set);
+
+  if (changed_params.empty()) {
+    RCLCPP_DEBUG(logger_, "Device->ROS parameter sync skipped: no changed values");
+    return;
+  }
+
   struct SyncGuard
   {
     explicit SyncGuard(std::atomic<bool> * flag)
@@ -1274,7 +1308,7 @@ void RoamadomeControl::updateParametersFromDevice()
     std::atomic<bool> * flag_;
   } sync_guard(&parameterSyncInProgress_);
 
-  auto results = node->set_parameters(params_to_set);
+  auto results = node->set_parameters(changed_params);
 
   size_t success_count = 0;
   for (const auto & result : results) {

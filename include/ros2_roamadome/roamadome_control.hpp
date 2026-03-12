@@ -181,6 +181,9 @@ private:
 
   // Parameter management methods
   void declareDeviceParameters();
+  static std::vector<rclcpp::Parameter> filterChangedParameters(
+    const rclcpp::Node::SharedPtr & node,
+    const std::vector<rclcpp::Parameter> & desired_parameters);
   void updateParametersFromDevice();
   rcl_interfaces::msg::SetParametersResult onParameterChange(
     const std::vector<rclcpp::Parameter> & parameters);
