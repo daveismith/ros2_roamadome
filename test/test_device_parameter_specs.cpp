@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include <rclcpp/rclcpp.hpp>
+
 #include "ros2_roamadome/device_parameter_specs.hpp"
 
 namespace ros2_roamadome
@@ -162,6 +164,34 @@ TEST(DeviceParameterSpecsTest, ParseAndStoreConfigValue_UpdatesRegistryAndValida
   EXPECT_TRUE(auto_mode->currentParameter().as_bool());
 
   EXPECT_FALSE(auto_mode->parseAndStoreConfigValue("banana", logger));
+}
+
+TEST(DeviceParameterSpecsTest, ReadOnlySpec_UsesWritableDescriptorForInternalSync)
+{
+  if (!rclcpp::ok()) {
+    int argc = 0;
+    char ** argv = nullptr;
+    rclcpp::init(argc, argv);
+  }
+
+  auto node = std::make_shared<rclcpp::Node>("read_only_spec_internal_sync_test");
+  DeviceParameterRegistry registry;
+
+  const auto * home_pos_spec = registry.findParameterSpecByConfigKey("HomePos");
+  ASSERT_NE(home_pos_spec, nullptr);
+  home_pos_spec->declareParameter(node);
+
+  const auto descriptor = node->describe_parameter(home_pos_spec->fullName());
+  EXPECT_FALSE(descriptor.read_only);
+
+  rclcpp::Parameter initial_value;
+  ASSERT_TRUE(node->get_parameter(home_pos_spec->fullName(), initial_value));
+  ASSERT_EQ(initial_value.get_type(), rclcpp::ParameterType::PARAMETER_INTEGER);
+
+  const int64_t new_value = initial_value.as_int() + 1;
+  auto result = node->set_parameters({rclcpp::Parameter(home_pos_spec->fullName(), new_value)});
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_TRUE(result[0].successful);
 }
 
 }  // namespace ros2_roamadome

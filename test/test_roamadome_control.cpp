@@ -385,6 +385,32 @@ TEST_F(RoamadomeControlTest, DeviceParameterSync_SkipsUnchangedSnapshots)
   EXPECT_TRUE(home_mode);
 }
 
+TEST_F(RoamadomeControlTest, OnParameterChange_RejectsReadOnlyDeviceParameter)
+{
+  const auto result = setDeviceParametersForTest(
+    {rclcpp::Parameter("device.home_pos", static_cast<int64_t>(90))});
+
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("read-only"), std::string::npos);
+}
+
+TEST_F(RoamadomeControlTest, OnParameterChange_WritableParameterRequiresActiveHardware)
+{
+  const auto result = setDeviceParametersForTest(
+    {rclcpp::Parameter("device.auto_mode", true)});
+
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("hardware interface is not active"), std::string::npos);
+}
+
+TEST_F(RoamadomeControlTest, OnParameterChange_IgnoresNonDeviceParameter)
+{
+  const auto result = setDeviceParametersForTest(
+    {rclcpp::Parameter("some_other_param", 123)});
+
+  EXPECT_TRUE(result.successful);
+}
+
 /**
  * ============================================================================
  * PARAMETER PARSING TESTS

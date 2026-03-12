@@ -894,6 +894,9 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
   }
 
   if (!paramCallbackHandle_) {
+    // Device parameters are descriptor-writable to allow internal
+    // Device->ROS synchronization via set_parameters(); user mutability is
+    // enforced here by rejecting non-writable device.* updates.
     paramCallbackHandle_ = node->add_on_set_parameters_callback(
       std::bind(&RoamadomeControl::onParameterChange, this, std::placeholders::_1));
   }
@@ -1340,7 +1343,9 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
   for (const auto & param : parameters) {
     const std::string & name = param.get_name();
 
-    // Only handle writable device.* parameters
+    // Only handle device.* parameters; user writes to non-writable fields are
+    // rejected below. Internal sync updates bypass this callback via
+    // parameterSyncInProgress_.
     if (name.find("device.") != 0) {
       continue;  // Not a device parameter, ignore
     }

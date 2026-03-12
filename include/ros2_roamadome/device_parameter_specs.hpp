@@ -338,7 +338,10 @@ template<typename TValue>
 void ReadOnlyParameterSpec<TValue>::declareParameter(const rclcpp::Node::SharedPtr & node) const
 {
   rcl_interfaces::msg::ParameterDescriptor descriptor;
-  descriptor.read_only = true;
+  // Keep descriptor writable so controller-internal Device->ROS sync via
+  // node->set_parameters(...) can update snapshots from #DPCONFIG.
+  // User-level immutability is enforced in RoamadomeControl::onParameterChange().
+  descriptor.read_only = false;
   descriptor.description = description();
   node->declare_parameter(fullName(), defaultValue(), descriptor);
 }

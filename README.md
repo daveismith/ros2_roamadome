@@ -244,11 +244,22 @@ Read-only parameters (from config snapshot parsing):
 
 Parameter update behavior:
 
+- Non-writable `device.*` fields are declared with `read_only=false` at the ROS descriptor layer so
+  internal Device->ROS snapshot sync (`node->set_parameters(...)`) can update them.
+- External writes to non-writable `device.*` fields are rejected in
+  `RoamadomeControl::onParameterChange(...)`.
 - Writable changes are validated in the parameter callback before queueing serial commands.
 - Non-writable `device.*` parameters are updated from device config reads and rejected if a user tries to set them directly.
 - Ack-tracked updates wait for `Write Settings` then `Updated` feedback from firmware.
 - After update ack, a config refresh (`#DPCONFIG` + `#DPINVALID`) is queued to synchronize all `device.*` values.
 - Device-to-ROS synchronization uses a guard (`parameterSyncInProgress_`) to avoid callback loops.
+
+### Parameter Mutability Test Plan
+
+- Verify internal sync path can update non-writable `device.*` fields through `set_parameters(...)`.
+- Verify external writes to non-writable `device.*` fields are rejected with a clear reason.
+- Verify writable `device.*` fields still go through callback validation and active-hardware checks.
+- Verify non-`device.*` parameters are ignored by the device callback policy.
 
 Examples:
 
