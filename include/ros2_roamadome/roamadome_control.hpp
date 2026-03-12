@@ -209,6 +209,7 @@ private:
   uint32_t startupReportTimeoutMs_ = 1000;
   uint32_t startupSetupTimeoutMs_ = 10000;
   uint32_t startupMaxRetries_ = 1;
+  uint32_t baudSweepSleepMs_ = 500;
   uint32_t startupLoopSleepMs_ = 10;
   uint32_t configStaleWarningMs_ = 30000;
   std::array<StartupCommandInfo, 8> startupCommandTable_{};

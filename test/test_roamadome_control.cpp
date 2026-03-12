@@ -48,6 +48,7 @@ protected:
     // Add hardware parameters
     info.hardware_parameters["serial_port"] = "/dev/ttyACM0";
     info.hardware_parameters["serial_baud"] = "115200";
+    info.hardware_parameters["baud_sweep_sleep_ms"] = "0";
 
     // Create the specified number of joints
     for (size_t i = 0; i < num_joints; ++i) {
@@ -145,7 +146,7 @@ public:
 
       struct timeval tv;
       tv.tv_sec = 0;
-      tv.tv_usec = 100000;
+      tv.tv_usec = 5000;
 
       int ret = select(master_fd_ + 1, &readfds, nullptr, nullptr, &tv);
       if (ret > 0 && FD_ISSET(master_fd_, &readfds)) {
@@ -754,21 +755,30 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_UsesConfigurableSetupTimeout)
   EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
 
   int setup_index = -1;
-  int config_index = -1;
+  int first_config_index = -1;
+  int config_after_setup_index = -1;
   {
     std::lock_guard<std::mutex> lock(commands_mutex);
     for (size_t idx = 0; idx < seen_commands.size(); ++idx) {
+      const bool is_config = seen_commands[idx].rfind("#DPCONFIG", 0) == 0;
+      if (first_config_index < 0 && is_config) {
+        first_config_index = static_cast<int>(idx);
+      }
       if (setup_index < 0 && seen_commands[idx].rfind("#DPSETUP", 0) == 0) {
         setup_index = static_cast<int>(idx);
       }
-      if (config_index < 0 && seen_commands[idx].rfind("#DPCONFIG", 0) == 0) {
-        config_index = static_cast<int>(idx);
+      if (setup_index >= 0 && config_after_setup_index < 0 && is_config &&
+        static_cast<int>(idx) > setup_index)
+      {
+        config_after_setup_index = static_cast<int>(idx);
       }
     }
   }
 
+  EXPECT_GE(first_config_index, 0);
   EXPECT_GE(setup_index, 0);
-  EXPECT_EQ(config_index, -1);
+  EXPECT_LT(first_config_index, setup_index);
+  EXPECT_EQ(config_after_setup_index, -1);
 }
 
 /**
@@ -1612,7 +1622,7 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_ParameterUpdateAck_TriggersConfigRefre
         if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() > timeout_ms) {
           return false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
       }
     };
 

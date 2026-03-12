@@ -233,6 +233,18 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   if (!parseOptionalUInt32Parameter(
       parameters,
       logger_,
+      "baud_sweep_sleep_ms",
+      500,
+      nullptr,
+      "",
+      &baudSweepSleepMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
       "startup_config_stale_warning_ms",
       30000,
       nullptr,
@@ -259,6 +271,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   RCLCPP_INFO(logger_, "Startup timeouts: default=%u ms setup=%u ms report=%u ms retries=%u",
               startupDefaultTimeoutMs_, startupSetupTimeoutMs_, startupReportTimeoutMs_,
               startupMaxRetries_);
+  RCLCPP_INFO(logger_, "Startup baud sweep settle sleep: %u ms", baudSweepSleepMs_);
 
   initializeStartupCommandTable();
 
@@ -268,13 +281,12 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
 hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   const rclcpp_lifecycle::State & previous_state)
 {
-  struct timespec ts = {};
-  ts.tv_sec = 0;
-  ts.tv_nsec = 500000000;
   if (0 == info_.rw_rate) {
     RCLCPP_ERROR(logger_, "Invalid rw_rate: 0");
     return hardware_interface::CallbackReturn::ERROR;
   }
+
+  const std::chrono::milliseconds baud_settle_sleep(baudSweepSleepMs_);
 
   const uint32_t cycle_ms = std::max<uint32_t>(1U, 1000U / info_.rw_rate);
   const uint32_t report_ms = (cycle_ms > 5U) ? (cycle_ms - 5U) : 1U;
@@ -324,7 +336,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
 
     // Read any opportunistic feedback while sweeping baud rates.
     serialHandler_->read();
-    nanosleep(&ts, NULL);
+    std::this_thread::sleep_for(baud_settle_sleep);
   }
 
   if (!serialHandler_->configurePort(serialBaud_)) {
@@ -333,7 +345,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     serialHandler_.reset();
     return hardware_interface::CallbackReturn::ERROR;
   }
-  nanosleep(&ts, NULL);
+  std::this_thread::sleep_for(baud_settle_sleep);
 
   if (!runStartupStateMachine(report_ms)) {
     RCLCPP_ERROR(logger_, "Startup state machine failed: %s",
