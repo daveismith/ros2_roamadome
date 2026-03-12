@@ -949,13 +949,14 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   }
 
   // Reset the send queue and related state to ensure a clean slate on next activation.
-  sendQueue_mutex_.lock();
-  while (!sendQueue_.empty()) {
-    sendQueue_.pop();
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    while (!sendQueue_.empty()) {
+      sendQueue_.pop();
+    }
+    sendQueueCommandActive_ = false;
+    sendQueueStage_ = SendQueueStage::IDLE;
   }
-  sendQueueCommandActive_ = false;
-  sendQueueStage_ = SendQueueStage::IDLE;
-  sendQueue_mutex_.unlock();
 
   if (serialHandler_) {
     serialHandler_->sendCommand("#DPREPORT0");
@@ -1050,7 +1051,6 @@ hardware_interface::return_type RoamadomeControl::write(
           RCLCPP_DEBUG(logger_, "Sent one-shot command '%s' (%s)",
             command.command.c_str(), command.label.c_str());
         }
-        //continue;
       } else if (serialHandler_->sendCommand(command.command)) {
         activeSendQueueCommand_ = command;
         sendQueueCommandActive_ = true;
