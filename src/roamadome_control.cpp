@@ -357,6 +357,11 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
+    for (size_t blankLineIndex = 0; blankLineIndex < 5; blankLineIndex++) {
+      // Send out a blank commond to flush out any partial lines in the buffer and elicit responses from the device at the current baud.
+      serialHandler_->sendCommand("");
+    }
+
     if (!serialHandler_->sendCommand(baud_command)) {
       RCLCPP_ERROR(logger_, "Failed to send baud configuration command at baud %u", target_baud);
       serialHandler_->close();
