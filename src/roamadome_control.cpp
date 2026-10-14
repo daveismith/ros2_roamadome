@@ -913,6 +913,50 @@ void RoamadomeControl::enqueueConfigDumpWithInvalidLocked(const std::string & re
   sendQueue_.push({reason + " #DPINVALID", "#DPINVALID", SendQueueCommand::Flow::ONE_SHOT, false});
 }
 
+bool RoamadomeControl::rotationInProgress(std::string * reason) const
+{
+  const int percent = lastCommandedPercent_.load();
+  if (0 == percent) {
+    return false;
+  }
+  *reason = "dome is rotating (commanded " + std::to_string(percent) +
+    "%); stop it before changing settings";
+  return true;
+}
+
+bool RoamadomeControl::queueSetHomeHere(std::string * message)
+{
+  if (!lifecycleActive_.load()) {
+    *message = "hardware interface is inactive; command not queued";
+    RCLCPP_WARN(logger_, "set_home_here called while hardware interface is inactive");
+    return false;
+  }
+
+  if (!serialHandler_ || !serialHandler_->isOpen()) {
+    *message = "hardware interface is unavailable; command not queued";
+    RCLCPP_WARN(logger_, "set_home_here called while serial interface is unavailable");
+    return false;
+  }
+
+  std::string rotating_reason;
+  if (rotationInProgress(&rotating_reason)) {
+    *message = rotating_reason;
+    RCLCPP_WARN(logger_, "set_home_here rejected: %s", rotating_reason.c_str());
+    return false;
+  }
+
+  // #DPHOMEPOS with no argument stores the current dome position as home. The firmware
+  // answers Write Settings / Updated, or Unchanged if home is already there.
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    sendQueue_.push({"set_home_here", "#DPHOMEPOS",
+        SendQueueCommand::Flow::PARAMETER_UPDATE_ACK, true});
+  }
+  *message = "Set home command queued";  // queued, not yet acked by the firmware
+  RCLCPP_INFO(logger_, "set_home_here called, #DPHOMEPOS will be sent in next write cycle");
+  return true;
+}
+
 void RoamadomeControl::enqueueStatusPollWithInvalidLocked(const std::string & reason)
 {
   // #DPINVALID ends the STATUS section promptly instead of waiting for the
@@ -938,7 +982,7 @@ void RoamadomeControl::handleSendQueueFeedback(const std::string & line)
     if ("Write Settings" == line) {
       sendQueueStage_ = SendQueueStage::WAIT_UPDATED;
       sendQueueStageStartTime_ = std::chrono::steady_clock::now();
-      RCLCPP_DEBUG(logger_, "Received 'Write Settings' for %s",
+      RCLCPP_INFO(logger_, "Received 'Write Settings' for %s",
         activeSendQueueCommand_.label.c_str());
       return;
     }
@@ -950,8 +994,18 @@ void RoamadomeControl::handleSendQueueFeedback(const std::string & line)
     }
   }
 
+  if (SendQueueStage::WAIT_WRITE_SETTINGS == sendQueueStage_ && "Unchanged" == line) {
+    // The firmware prints only "Unchanged" when the value is already set: nothing was
+    // written, so there is nothing to refresh.
+    RCLCPP_INFO(logger_, "Received 'Unchanged' for %s; ack complete, no config refresh",
+      activeSendQueueCommand_.label.c_str());
+    sendQueueCommandActive_ = false;
+    sendQueueStage_ = SendQueueStage::IDLE;
+    return;
+  }
+
   if (SendQueueStage::WAIT_UPDATED == sendQueueStage_ && "Updated" == line) {
-    RCLCPP_DEBUG(logger_, "Received 'Updated' for %s", activeSendQueueCommand_.label.c_str());
+    RCLCPP_INFO(logger_, "Received 'Updated' for %s", activeSendQueueCommand_.label.c_str());
     if (activeSendQueueCommand_.post_ack_config_dump) {
       enqueueConfigDumpWithInvalidLocked("post-update");
     }
@@ -995,6 +1049,17 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
 
   ensureParameterCallbackRegistered(node);
 
+  // Drop anything queued while inactive (for example a set_home_here racing a
+  // deactivate) so it is not sent at the start of this activation.
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    while (!sendQueue_.empty()) {
+      sendQueue_.pop();
+    }
+    sendQueueCommandActive_ = false;
+    sendQueueStage_ = SendQueueStage::IDLE;
+  }
+
   // on_deactivate closes the serial port, and an inactive -> active transition
   // does not pass through on_configure again, so reopen the device here.
   if (!serialHandler_) {
@@ -1022,6 +1087,15 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
         response->success = true;
         response->message = "Setup command queued";
         RCLCPP_INFO(logger_, "Setup service called, #DPSETUP will be sent in next write cycle");
+      });
+  }
+
+  if (!setHomeService_) {
+    setHomeService_ = node->create_service<std_srvs::srv::Trigger>(
+      "~/set_home_here",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>/* request */,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        response->success = queueSetHomeHere(&response->message);
       });
   }
 
@@ -1098,6 +1172,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   lifecycleActive_.store(false);
 
   setupService_.reset();
+  setHomeService_.reset();
   // Keep the callback registered across deactivate so device.* writes continue
   // to be validated/rejected deterministically while hardware is inactive.
 
@@ -1697,6 +1772,13 @@ rcl_interfaces::msg::SetParametersResult RoamadomeControl::onParameterChange(
       result.successful = false;
       result.reason = "cannot update device parameter " + name +
         ": hardware interface is not active";
+      return result;
+    }
+
+    std::string rotating_reason;
+    if (rotationInProgress(&rotating_reason)) {
+      result.successful = false;
+      result.reason = "cannot update device parameter " + name + ": " + rotating_reason;
       return result;
     }
 

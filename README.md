@@ -271,27 +271,38 @@ Writable parameters (ROS -> device):
 | `device.auto_max_delay` | int | `0..255` | `#DPAUTOMAX<n>` |
 | `device.speed_auto` | int | `0..100` | `#DPAUTOSPEED<n>` |
 | `device.fudge` | int | `0..20` | `#DPFUDGE<n>` |
+| `device.max_speed` | int | `0..100` | `#DPMAXSPEED<n>` |
+| `device.min_speed` | int | `0..100` | `#DPMINSPEED<n>` |
+| `device.speed_target` | int | `0..100` | `#DPTARGETSPEED<n>` |
+| `device.speed_home` | int | `0..100` | `#DPHOMESPEED<n>` |
+| `device.scaling` | bool | `true/false` | `#DPSCALE0/1` |
+| `device.acceleration_scale` | int | `0..255` | `#DPASCALE<n>` |
+| `device.deceleration_scale` | int | `0..255` | `#DPDSCALE<n>` |
+| `device.timeout` | int | `1..30` | `#DPTIMEOUT<n>` |
+
+The firmware clamps `#DPTIMEOUT` to 30 seconds, so larger values are rejected here rather than
+silently clamped. The firmware can report `Timeout=0`, which is accepted when reading the config
+but rejected on write (`1..30`). Every write persists to flash.
+
+Writing a setting makes the firmware stop the drive (for example `setMaxSpeed` calls `stop()`), and
+a position move in flight is aborted by the firmware when any setting is written. The interface
+does not block the latter. It does reject `device.*` writes and `~/set_home_here` while a
+continuous rotation is commanded (last `:DPR` percent is non-zero), because `write()` only resends
+`:DPR` when the command changes and the dome would stay stopped while the controller believes it
+is driving. Stop the rotation first.
 
 Read-only parameters (from config snapshot parsing):
 
 - `device.home_pos`
-- `device.max_speed`
-- `device.min_speed`
 - `device.input_speed`
-- `device.scaling`
 - `device.inverted`
-- `device.timeout`
 - `device.auto_safety`
 - `device.auto_restart`
-- `device.acceleration_scale`
-- `device.deceleration_scale`
 - `device.home_min_delay`
 - `device.home_max_delay`
 - `device.target_min_delay`
 - `device.target_max_delay`
 - `device.setup_angular_velocity`
-- `device.speed_home`
-- `device.speed_target`
 - `device.syren_address_in`
 - `device.syren_address_out`
 - `device.sensor_baud`
@@ -320,7 +331,10 @@ Parameter update behavior:
   (`on_configure` completed but not active, or deactivated).
 - Writable changes are validated in the parameter callback before queueing serial commands.
 - Non-writable `device.*` parameters are updated from device config reads and rejected if a user tries to set them directly.
-- Ack-tracked updates wait for `Write Settings` then `Updated` feedback from firmware.
+- Ack-tracked updates wait for `Write Settings` then `Updated` feedback from firmware. If the
+  value is already set the firmware prints only `Unchanged`; that completes the ack immediately
+  and no config refresh is queued. `Write Settings`, `Updated` and `Unchanged` acks are logged at
+  INFO.
 - After update ack, a config refresh (`#DPCONFIG` + `#DPINVALID`) is queued to synchronize all `device.*` values.
 - Device-to-ROS synchronization uses a thread-local callback bypass guard to avoid callback loops
   without dropping concurrent external writes from other threads.
@@ -333,6 +347,15 @@ Parameter update behavior:
 - Verify external writes to non-writable `device.*` fields are rejected with a clear reason.
 - Verify writable `device.*` fields still go through callback validation and active-hardware checks.
 - Verify non-`device.*` parameters are ignored by the device callback policy.
+- Verify the speed and ramp settings (`device.max_speed` etc.) build the documented `#DP...` command
+  and reject out-of-range values, while `inverted`, `home_pos`, `auto_safety`, baud rates and
+  addresses stay read-only.
+- Verify a firmware `Unchanged` reply completes an ack-tracked write without a `#DPCONFIG` refresh
+  or an ack timeout.
+- Verify settings writes and `~/set_home_here` are rejected while a rotation is commanded and
+  accepted after `:DPR0`.
+- Verify `~/set_home_here` queues `#DPHOMEPOS` and that `Write Settings` + `Updated` triggers a
+  config refresh.
 
 Examples:
 
@@ -344,10 +367,23 @@ ros2 param set /roamadome device.auto_mode true
 ros2 param set /roamadome device.auto_left 90
 ros2 param set /roamadome device.auto_right 90
 
+# Change a speed setting (persists to flash)
+ros2 param set /roamadome device.max_speed 60
+
+# Store the current dome position as home (refreshes device.home_pos)
+ros2 service call /roamadome/set_home_here std_srvs/srv/Trigger
+
 # Read back synchronized values
 ros2 param get /roamadome device.auto_mode
 ros2 param get /roamadome device.home_pos
 ```
+
+Services on the hardware node:
+
+| Service | Type | Effect |
+|---------|------|--------|
+| `~/setup` | `std_srvs/Trigger` | Sends `#DPSETUP` (one-shot) |
+| `~/set_home_here` | `std_srvs/Trigger` | Sends `#DPHOMEPOS`, ack-tracked; the current position becomes home and `device.home_pos` refreshes after the ack. `success=true` means only that the command was queued, not that the firmware acked it. Rejected while inactive, with the port closed, or while a rotation is commanded |
 
 ### Startup Configure Sequence
 

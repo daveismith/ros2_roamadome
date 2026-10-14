@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -148,7 +149,8 @@ public:
     TValue default_value,
     TValue min_value = std::numeric_limits<TValue>::lowest(),
     TValue max_value = std::numeric_limits<TValue>::max(),
-    ParameterValidator validator = nullptr)
+    ParameterValidator validator = nullptr,
+    std::optional<TValue> write_min_value = std::nullopt)
   : WritableParameterSpecBase(
       field_name,
       buildFullName(field_name),
@@ -160,7 +162,8 @@ public:
     default_value_typed_(default_value),
     min_value_(min_value),
     max_value_(max_value),
-    validator_(std::move(validator))
+    validator_(std::move(validator)),
+    write_min_value_(write_min_value)
   {
   }
 
@@ -213,6 +216,9 @@ private:
   TValue min_value_;
   TValue max_value_;
   ParameterValidator validator_;
+  // Lower bound enforced only on writes; config parsing uses min_value_. Needed where the
+  // firmware reports a value it will not accept as a new setting.
+  std::optional<TValue> write_min_value_;
 };
 
 class DeviceParameterRegistry
@@ -493,7 +499,7 @@ bool WritableParameterSpec<TValue>::validateAndBuildCommand(
     }
   } else if constexpr (!std::is_same<TValue, bool>::value) {
     const int64_t value = parameter.as_int();
-    const int64_t min_i64 = static_cast<int64_t>(min_value_);
+    const int64_t min_i64 = static_cast<int64_t>(write_min_value_.value_or(min_value_));
     const int64_t max_i64 = static_cast<int64_t>(max_value_);
 
     if (value < min_i64 || value > max_i64) {

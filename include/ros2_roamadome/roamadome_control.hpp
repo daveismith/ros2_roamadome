@@ -175,6 +175,8 @@ private:
   void handleStartupUnhandledLine(const std::string & line);
   void handleSendQueueFeedback(const std::string & line);
   void logStartupTransition(const std::string & message);
+  bool queueSetHomeHere(std::string * message);
+  bool rotationInProgress(std::string * reason) const;
   void enqueueConfigDumpWithInvalidLocked(const std::string & reason);
   void enqueueStatusPollWithInvalidLocked(const std::string & reason);
 
@@ -296,6 +298,7 @@ private:
 
   // Setup service
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr setupService_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr setHomeService_;
 
   // Telemetry and velocity estimation (docs/dome_diagnostics_plan.md, phase 1).
   // positionTracker_ and telemetrySequence_ are only touched from the read path.

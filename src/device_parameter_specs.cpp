@@ -13,25 +13,13 @@ std::vector<std::unique_ptr<DeviceParameterSpecBase>> buildParameterSpecs()
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint16_t>>(
       "home_pos", "HomePos", "Home position", 0, 0, 359));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "max_speed", "MaxSpeed", "Maximum speed", 50, 0, 100));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "min_speed", "MinSpeed", "Minimum speed", 15, 0, 100));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
       "input_speed", "InputSpeed", "Input speed", 100, 0, 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
-      "scaling", "Scaling", "Scaling mode", false));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
       "inverted", "Inverted", "Inverted mode", true));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "timeout", "Timeout", "Timeout", 5, 0, 30));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
       "auto_safety", "AutoSafety", "Auto safety", false));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<bool>>(
       "auto_restart", "AutoRestart", "Auto restart", true));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "acceleration_scale", "AccelerationScale", "Acceleration scale", 20));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "deceleration_scale", "DecelerationScale", "Deceleration scale", 50));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
       "home_min_delay", "HomeMinDelay", "Home minimum delay", 6));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
@@ -42,10 +30,6 @@ std::vector<std::unique_ptr<DeviceParameterSpecBase>> buildParameterSpecs()
       "target_max_delay", "TargetMaxDelay", "Target maximum delay", 1));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint16_t>>(
       "setup_angular_velocity", "SetupAngularVelocity", "Setup angular velocity", 100));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "speed_home", "SpeedHome", "Home speed", 40, 0, 100));
-  specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
-      "speed_target", "SpeedTarget", "Target speed", 100, 0, 100));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
       "syren_address_in", "SyrenAddressIn", "Syren input address", 129));
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
@@ -77,6 +61,28 @@ std::vector<std::unique_ptr<DeviceParameterSpecBase>> buildParameterSpecs()
   specs.emplace_back(std::make_unique<ReadOnlyParameterSpec<uint8_t>>(
       "digital_out", "DOut", "Digital output", 0));
 
+  // Speed and ramp settings. Prefixes and clamps verified against
+  // DomeControlFirmware processConfigureCommand (f9b1b83).
+  specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
+      "max_speed", "MaxSpeed", "Maximum speed (0-100)", "#DPMAXSPEED", 50, 0, 100));
+  specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
+      "min_speed", "MinSpeed", "Minimum speed (0-100)", "#DPMINSPEED", 15, 0, 100));
+  specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
+      "speed_home", "SpeedHome", "Home speed (0-100)", "#DPHOMESPEED", 40, 0, 100));
+  specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
+      "speed_target", "SpeedTarget", "Target speed (0-100)", "#DPTARGETSPEED", 100, 0, 100));
+  specs.emplace_back(std::make_unique<WritableParameterSpec<bool>>(
+      "scaling", "Scaling", "Enable acceleration/deceleration scaling", "#DPSCALE",
+      false, false, true, getBoolTypeLambda<bool>()));
+  specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
+      "acceleration_scale", "AccelerationScale", "Acceleration scale (0-255)", "#DPASCALE",
+      20, 0, 255));
+  specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
+      "deceleration_scale", "DecelerationScale", "Deceleration scale (0-255)", "#DPDSCALE",
+      50, 0, 255));
+  specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
+      "timeout", "Timeout", "Position move timeout (1-30 seconds)", "#DPTIMEOUT", 5, 0, 30,
+      nullptr, 1));
   specs.emplace_back(std::make_unique<WritableParameterSpec<bool>>(
       "auto_mode", "AutoMode", "Enable/disable automatic dome movement mode", "#DPAUTO",
       false, false, true, getBoolTypeLambda<bool>()));
