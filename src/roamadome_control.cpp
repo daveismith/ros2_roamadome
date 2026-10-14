@@ -913,6 +913,26 @@ void RoamadomeControl::enqueueConfigDumpWithInvalidLocked(const std::string & re
   sendQueue_.push({reason + " #DPINVALID", "#DPINVALID", SendQueueCommand::Flow::ONE_SHOT, false});
 }
 
+bool RoamadomeControl::queueSetHomeHere(std::string * message)
+{
+  if (!serialHandler_ || !serialHandler_->isOpen()) {
+    *message = "hardware interface is unavailable; command not queued";
+    RCLCPP_WARN(logger_, "set_home_here called while serial interface is unavailable");
+    return false;
+  }
+
+  // #DPHOMEPOS with no argument stores the current dome position as home. The firmware
+  // answers Write Settings / Updated, or Unchanged if home is already there.
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    sendQueue_.push({"set_home_here", "#DPHOMEPOS",
+        SendQueueCommand::Flow::PARAMETER_UPDATE_ACK, true});
+  }
+  *message = "Set home command queued";
+  RCLCPP_INFO(logger_, "set_home_here called, #DPHOMEPOS will be sent in next write cycle");
+  return true;
+}
+
 void RoamadomeControl::enqueueStatusPollWithInvalidLocked(const std::string & reason)
 {
   // #DPINVALID ends the STATUS section promptly instead of waiting for the
@@ -948,6 +968,16 @@ void RoamadomeControl::handleSendQueueFeedback(const std::string & line)
         activeSendQueueCommand_.label.c_str());
       return;
     }
+  }
+
+  if (SendQueueStage::WAIT_WRITE_SETTINGS == sendQueueStage_ && "Unchanged" == line) {
+    // The firmware prints only "Unchanged" when the value is already set: nothing was
+    // written, so there is nothing to refresh.
+    RCLCPP_DEBUG(logger_, "Received 'Unchanged' for %s; ack complete, no config refresh",
+      activeSendQueueCommand_.label.c_str());
+    sendQueueCommandActive_ = false;
+    sendQueueStage_ = SendQueueStage::IDLE;
+    return;
   }
 
   if (SendQueueStage::WAIT_UPDATED == sendQueueStage_ && "Updated" == line) {
@@ -1025,6 +1055,15 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
       });
   }
 
+  if (!setHomeService_) {
+    setHomeService_ = node->create_service<std_srvs::srv::Trigger>(
+      "~/set_home_here",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>/* request */,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        response->success = queueSetHomeHere(&response->message);
+      });
+  }
+
   if (!periodicConfigTimer_) {
     periodicConfigTimer_ = node->create_wall_timer(
       std::chrono::milliseconds(configRefreshIntervalMs_),
@@ -1098,6 +1137,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   lifecycleActive_.store(false);
 
   setupService_.reset();
+  setHomeService_.reset();
   // Keep the callback registered across deactivate so device.* writes continue
   // to be validated/rejected deterministically while hardware is inactive.
 

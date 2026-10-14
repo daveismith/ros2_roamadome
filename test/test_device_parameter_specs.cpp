@@ -22,7 +22,7 @@ TEST(DeviceParameterSpecsTest, GetAllParameterSpecs_ContainsExpectedCounts)
     }
   }
 
-  EXPECT_EQ(writable_count, 8U);
+  EXPECT_EQ(writable_count, 16U);
 }
 
 TEST(DeviceParameterSpecsTest, ConfigFields_HaveConfigKeyMappings)
@@ -131,6 +131,82 @@ TEST(DeviceParameterSpecsTest, ValidateAndBuildCommand_EnforcesRange)
   EXPECT_FALSE(spec->validateAndBuildCommand(
       rclcpp::Parameter("device.auto_left", 181), &command, &reason));
   EXPECT_NE(reason.find("range"), std::string::npos);
+}
+
+TEST(DeviceParameterSpecsTest, SpeedSettings_AreWritableWithFirmwareCommandPrefixes)
+{
+  struct Case
+  {
+    const char * field;
+    int64_t value;
+    const char * expected;
+  };
+  const std::vector<Case> cases = {
+    {"max_speed", 60, "#DPMAXSPEED60"},
+    {"min_speed", 15, "#DPMINSPEED15"},
+    {"speed_target", 100, "#DPTARGETSPEED100"},
+    {"speed_home", 40, "#DPHOMESPEED40"},
+    {"acceleration_scale", 255, "#DPASCALE255"},
+    {"deceleration_scale", 0, "#DPDSCALE0"},
+    {"timeout", 1, "#DPTIMEOUT1"},
+    {"timeout", 30, "#DPTIMEOUT30"},
+  };
+  for (const auto & c : cases) {
+    const auto * spec = findWritableParameterSpec(c.field);
+    ASSERT_NE(spec, nullptr) << c.field;
+    std::string command;
+    std::string reason;
+    EXPECT_TRUE(spec->validateAndBuildCommand(
+        rclcpp::Parameter(std::string("device.") + c.field, c.value), &command, &reason))
+      << c.field << ": " << reason;
+    EXPECT_EQ(command, c.expected);
+  }
+
+  const auto * scaling = findWritableParameterSpec("scaling");
+  ASSERT_NE(scaling, nullptr);
+  std::string command;
+  std::string reason;
+  EXPECT_TRUE(scaling->validateAndBuildCommand(
+      rclcpp::Parameter("device.scaling", true), &command, &reason));
+  EXPECT_EQ(command, "#DPSCALE1");
+  EXPECT_TRUE(scaling->validateAndBuildCommand(
+      rclcpp::Parameter("device.scaling", false), &command, &reason));
+  EXPECT_EQ(command, "#DPSCALE0");
+  EXPECT_FALSE(scaling->validateAndBuildCommand(
+      rclcpp::Parameter("device.scaling", 1), &command, &reason));
+}
+
+TEST(DeviceParameterSpecsTest, SpeedSettings_RejectOutOfRangeValues)
+{
+  struct Case
+  {
+    const char * field;
+    int64_t value;
+  };
+  const std::vector<Case> cases = {
+    {"max_speed", 101}, {"max_speed", -1}, {"min_speed", 101}, {"speed_target", 101},
+    {"speed_home", 101}, {"acceleration_scale", 256}, {"deceleration_scale", -1},
+    {"timeout", 0}, {"timeout", 31},
+  };
+  for (const auto & c : cases) {
+    const auto * spec = findWritableParameterSpec(c.field);
+    ASSERT_NE(spec, nullptr) << c.field;
+    std::string command;
+    std::string reason;
+    EXPECT_FALSE(spec->validateAndBuildCommand(
+        rclcpp::Parameter(std::string("device.") + c.field, c.value), &command, &reason))
+      << c.field << "=" << c.value;
+    EXPECT_FALSE(reason.empty());
+  }
+}
+
+TEST(DeviceParameterSpecsTest, ProtectedSettings_StayReadOnly)
+{
+  for (const char * field : {"inverted", "home_pos", "auto_safety", "sensor_baud",
+      "syren_baud", "serial_baud", "syren_address_in", "syren_address_out"})
+  {
+    EXPECT_EQ(findWritableParameterSpec(field), nullptr) << field;
+  }
 }
 
 TEST(DeviceParameterSpecsTest, FindParameterSpecByConfigKey_ResolvesKnownKey)

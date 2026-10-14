@@ -100,6 +100,17 @@ protected:
     controller_->lifecycleActive_.store(active);
   }
 
+  bool queueSetHomeHereForTest(std::string * message)
+  {
+    return controller_->queueSetHomeHere(message);
+  }
+
+  bool sendQueueCommandActiveForTest() const
+  {
+    std::lock_guard<std::mutex> lock(controller_->sendQueue_mutex_);
+    return controller_->sendQueueCommandActive_;
+  }
+
   double positionStateForTest() const {return controller_->position_;}
   double velocityStateForTest() const {return controller_->velocity_;}
 
@@ -1749,6 +1760,209 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_ParameterUpdateAck_TriggersConfigRefre
   ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
   ASSERT_TRUE(wait_for_command("#DPINVALID", 500));
 
+}
+
+namespace
+{
+
+// Scripted firmware for the ack-flow tests: records every command line and answers the
+// config dump the way the real controller does, but never acks a setting by itself.
+class AckFirmware
+{
+public:
+  explicit AckFirmware(PseudoTerminal * pty)
+  : pty_(pty), worker_([this]() {run();}) {}
+
+  ~AckFirmware()
+  {
+    running_.store(false);
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+  void clear()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    seen_.clear();
+  }
+
+  int count(const std::string & exact)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<int>(std::count(seen_.begin(), seen_.end(), exact));
+  }
+
+  bool waitFor(const std::string & exact, int timeout_ms)
+  {
+    const auto start = std::chrono::steady_clock::now();
+    while (count(exact) == 0) {
+      if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(timeout_ms)) {
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return true;
+  }
+
+private:
+  void run()
+  {
+    std::string line;
+    while (running_.load()) {
+      if (!pty_->readLine(&line, 100)) {
+        continue;
+      }
+      if (line.rfind("DP", 0) == 0) {
+        line = "#" + line;  // PTY can drop the leading '#'
+      }
+      if (!line.empty() && '#' == line.front()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        seen_.push_back(line);
+      }
+      if (line.rfind("#DPCONFIG", 0) == 0) {
+        pty_->writeText("PROCESS: \"#DPCONFIG\"\nAutoSafety=0\nAutoMode=0\nHomeMode=0\n");
+      } else if (line.rfind("#DPSTATUS", 0) == 0) {
+        pty_->writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+      } else if (line.rfind("#DPREPORT", 0) == 0) {
+        pty_->writeText("PROCESS: \"" + line + "\"\n");
+      } else if (line.rfind("#DPINVALID", 0) == 0) {
+        pty_->writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+      }
+    }
+  }
+
+  PseudoTerminal * pty_;
+  std::atomic<bool> running_{true};
+  std::mutex mutex_;
+  std::vector<std::string> seen_;
+  std::thread worker_;
+};
+
+}  // namespace
+
+TEST_F(RoamadomeControlTest, RuntimeQueue_MaxSpeedWrite_SendsCommandAndUpdatedTriggersRefresh)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  AckFirmware firmware(&pty);
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+  setLifecycleActiveForTest(true);
+  firmware.clear();
+
+  ASSERT_TRUE(setDeviceParametersForTest({rclcpp::Parameter("device.max_speed", 60)}).successful);
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor("#DPMAXSPEED60", 500));
+
+  pty.writeText("Restore Dome Settings\nWrite Settings\nUpdated\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  EXPECT_TRUE(firmware.waitFor("#DPCONFIG", 500));
+}
+
+TEST_F(RoamadomeControlTest, RuntimeQueue_UnchangedReply_CompletesAckWithoutConfigRefresh)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  AckFirmware firmware(&pty);
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+  setLifecycleActiveForTest(true);
+  firmware.clear();
+
+  ASSERT_TRUE(setDeviceParametersForTest({rclcpp::Parameter("device.max_speed", 60)}).successful);
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor("#DPMAXSPEED60", 500));
+  EXPECT_TRUE(sendQueueCommandActiveForTest());
+
+  pty.writeText("Unchanged\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+
+  // Completed immediately by the reply, long before the 3 s ack timeout.
+  EXPECT_FALSE(sendQueueCommandActiveForTest());
+
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  EXPECT_EQ(firmware.count("#DPCONFIG"), 0);
+  EXPECT_EQ(firmware.count("#DPINVALID"), 0);
+}
+
+TEST_F(RoamadomeControlTest, RuntimeQueue_SetHomeHere_QueuesHomePosAndUpdatedTriggersRefresh)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  AckFirmware firmware(&pty);
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+  setLifecycleActiveForTest(true);
+  firmware.clear();
+
+  std::string message;
+  ASSERT_TRUE(queueSetHomeHereForTest(&message)) << message;
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor("#DPHOMEPOS", 500));
+
+  // The firmware echoes the current position first, then the usual write pair.
+  pty.writeText("\nCURRENT POSITION: 123\nRestore Dome Settings\nWrite Settings\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+  EXPECT_EQ(firmware.count("#DPCONFIG"), 0);
+
+  pty.writeText("Updated\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  EXPECT_TRUE(firmware.waitFor("#DPCONFIG", 500));
 }
 
 /**
