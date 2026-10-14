@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -98,6 +99,9 @@ protected:
   {
     controller_->lifecycleActive_.store(active);
   }
+
+  double positionStateForTest() const {return controller_->position_;}
+  double velocityStateForTest() const {return controller_->velocity_;}
 
   std::unique_ptr<RoamadomeControl> controller_;
 };
@@ -1739,6 +1743,95 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_ParameterUpdateAck_TriggersConfigRefre
   ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
   ASSERT_TRUE(wait_for_command("#DPINVALID", 500));
 
+}
+
+/**
+ * ============================================================================
+ * POSITION STREAM -> STATE INTERFACE TESTS
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, PositionReports_FillPositionAndVelocityState)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+  info.hardware_parameters["velocity_window_s"] = "0.3";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state),
+    hardware_interface::CallbackReturn::SUCCESS);
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.028);
+
+  auto feed_report = [&](int degrees) {
+      pty.writeText("DOME POSITION: " + std::to_string(degrees) + "\n");
+      // Give the pty a moment to deliver, then let the read path consume it.
+      std::this_thread::sleep_for(std::chrono::milliseconds(28));
+      ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+    };
+
+  // First report: position known, velocity not yet estimable.
+  feed_report(355);
+  EXPECT_NEAR(positionStateForTest(), 355.0 * M_PI / 180.0, 1e-9);
+  EXPECT_TRUE(std::isnan(velocityStateForTest()));
+
+  // Walk forward across the 359 -> 0 boundary at about 36 deg/s.
+  for (int degrees : {356, 357, 358, 359, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}) {
+    feed_report(degrees);
+  }
+
+  EXPECT_NEAR(positionStateForTest(), 10.0 * M_PI / 180.0, 1e-9);
+  ASSERT_FALSE(std::isnan(velocityStateForTest()));
+  EXPECT_GT(velocityStateForTest(), 0.0);
+  // Timing in the test is sleep-driven, so only bound the estimate loosely.
+  EXPECT_LT(velocityStateForTest(), 2.0 * 36.0 * M_PI / 180.0);
+
+  // Reverse direction: velocity sign must follow the unwrapped position change.
+  for (int degrees : {9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 359, 358, 357, 356, 355, 354}) {
+    feed_report(degrees);
+  }
+  EXPECT_NEAR(positionStateForTest(), 354.0 * M_PI / 180.0, 1e-9);
+  ASSERT_FALSE(std::isnan(velocityStateForTest()));
+  EXPECT_LT(velocityStateForTest(), 0.0);
 }
 
 }  // namespace ros2_roamadome

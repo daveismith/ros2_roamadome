@@ -3,8 +3,10 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "astromech_msgs/msg/dome_telemetry.hpp"
 
 #include "ros2_roamadome/device_parameter_specs.hpp"
+#include "ros2_roamadome/position_tracker.hpp"
 #include "ros2_roamadome/visibility_control.h"
 #include "ros2_roamadome/roamadome_serial_port.hpp"
 #include "hardware_interface/actuator_interface.hpp"
@@ -166,6 +168,7 @@ private:
     uint32_t timeout_ms);
   bool retryCurrentStartupCommand(StartupContext * context);
   bool runStartupStateMachine(uint32_t report_ms);
+  bool openDeviceAndRunStartup();
   void handleStartupUnhandledLine(const std::string & line);
   void handleSendQueueFeedback(const std::string & line);
   void logStartupTransition(const std::string & message);
@@ -178,6 +181,11 @@ private:
   bool sendPositionCommand(uint32_t degrees);
   bool sendVelocityCommand(int32_t percentage);
   bool sendStopCommand();
+
+  // Telemetry and velocity estimation
+  void handlePositionReport(uint32_t degrees, double radians);
+  void recordCommandedPercent(int32_t percentage);
+  static uint8_t telemetryCommandModeValue(CommandMode mode);
 
   // Parameter management methods
   void ensureParameterCallbackRegistered(const rclcpp::Node::SharedPtr & node);
@@ -280,6 +288,20 @@ private:
   // Setup service
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr setupService_;
 
+  // Telemetry and velocity estimation (docs/dome_diagnostics_plan.md, phase 1).
+  // positionTracker_ and telemetrySequence_ are only touched from the read path.
+  // lastCommandedPercent_ and telemetryCommandMode_ are written from the write
+  // path and the mode switch, read from the read path, hence atomics.
+  bool publishTelemetry_ = false;
+  double velocityWindowS_ = 0.5;
+  PositionTracker positionTracker_;
+  uint32_t telemetrySequence_ = 0;
+  std::atomic<int8_t> lastCommandedPercent_{0};
+  std::atomic<uint8_t> telemetryCommandMode_{0};
+  rclcpp::Publisher<astromech_msgs::msg::DomeTelemetry>::SharedPtr telemetryPublisher_;
+  rclcpp::Clock::SharedPtr telemetryClock_;
+  mutable std::mutex telemetry_mutex_;  // Protects telemetryPublisher_ and telemetryClock_
+
   // Inner class: Observer for serial port events
   class SerialEventHandler : public ISerialObserver
   {
@@ -293,16 +315,14 @@ public:
 
     void onPositionUpdate(uint32_t degrees, double radians) override
     {
-      controller_->position_ = radians;
-      RCLCPP_DEBUG(
-        controller_->logger_,
-        "Position updated: %u° = %.4f rad", degrees, radians);
+      controller_->handlePositionReport(degrees, radians);
     }
 
     void onVelocityUpdate(double rad_per_sec) override
     {
       (void)rad_per_sec;
-      // Device does not send velocity updates, this is a no-op
+      // Device does not send velocity updates; velocity is estimated from the
+      // position stream in handlePositionReport().
     }
 
     void onUnhandledLine(const std::string & line) override

@@ -17,6 +17,7 @@ find_package(controller_manager REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(astromech_msgs REQUIRED)
 
 # build library
 add_library(ros2_roamadome
@@ -40,6 +41,7 @@ ament_target_dependencies(ros2_roamadome PUBLIC
   rclcpp
   pluginlib
   std_srvs
+  astromech_msgs
 )
 pluginlib_export_plugin_description_file(hardware_interface robot_hardware.xml)
 
@@ -92,6 +94,13 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_roamadome_control ros2_roamadome)
 
+  # Unit tests for PositionTracker (header-only, no ROS dependency)
+  ament_add_gtest(test_position_tracker test/test_position_tracker.cpp)
+  target_include_directories(test_position_tracker PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+
   # Unit tests for DeviceParameterSpecs
   ament_add_gtest(test_device_parameter_specs test/test_device_parameter_specs.cpp)
   target_include_directories(test_device_parameter_specs PUBLIC
@@ -125,6 +134,8 @@ ament_export_dependencies(
   controller_manager
   rclcpp
   pluginlib
+  std_srvs
+  astromech_msgs
 )
 
 ament_package()
