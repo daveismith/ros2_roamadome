@@ -54,7 +54,7 @@ The controller exports the following state interfaces for the `dome_joint`:
 | Interface | Description |
 |-----------|-------------|
 | `dome_joint/position` | Current dome position in radians (0-2π) |
-| `dome_joint/velocity` | Current dome angular velocity in rad/s (currently 0.0 unless device velocity feedback is added) |
+| `dome_joint/velocity` | Dome angular velocity in rad/s, estimated from the firmware position stream (see [Velocity estimate and telemetry](#velocity-estimate-and-telemetry)). NaN until the regression window is populated after activation. |
 
 ### Command Interfaces
 
@@ -64,6 +64,42 @@ The controller accepts the following command interfaces for the `dome_joint`:
 |-----------|-------------|
 | `dome_joint/position` | Desired dome position in radians |
 | `dome_joint/velocity` | Desired dome angular velocity in rad/s |
+
+### Velocity estimate and telemetry
+
+The firmware reports only an integer, home-relative angle (`DOME POSITION: <n>`)
+at the interval requested by `#DPREPORT`. The hardware interface unwraps that
+stream into a continuous angle (shortest signed step between successive
+readings) and estimates velocity as the least-squares slope of unwrapped angle
+against host receive time over the trailing `velocity_window_s` seconds. The
+estimate is NaN until the window holds at least four samples spanning at least
+40% of the window. Adjacent samples are never differentiated directly: one
+degree of quantisation at a 28 ms report interval would be 36°/s of noise per
+sample. The implementation is the header-only `PositionTracker` in
+`include/ros2_roamadome/position_tracker.hpp`.
+
+With `publish_telemetry` set to `true`, every position report is also published
+as `astromech_msgs/msg/DomeTelemetry` on `~/telemetry` of the hardware
+component's node. The node is named after the `ros2_control` block in lower
+case, so the `RoamADome` block publishes on `/roamadome/telemetry`:
+
+| Field | Meaning |
+|-------|---------|
+| `header.stamp` | Host time when the read cycle consumed the report line, so quantised to the controller manager period |
+| `position_deg` | Integer angle from the firmware, 0..359 |
+| `position_rad` | The same angle in radians, [0, 2π) |
+| `unwrapped_rad` | Continuous angle since activation |
+| `velocity_rad_s` | Regression velocity estimate, NaN until the window is populated |
+| `commanded_percent` | Last `:DPR` percentage sent in any mode, 0 when none |
+| `command_mode` | 0 idle, 1 position, 2 velocity, 3 bench |
+| `sequence` | Increments per report line since activation |
+
+The topic is intended for the bench diagnostics described in
+[docs/dome_diagnostics_plan.md](docs/dome_diagnostics_plan.md) and is off by default.
+Because the serial port is polled from `read()`, the stamp resolution is one
+controller manager cycle (33 ms at 30 Hz) and two report lines that arrive in
+the same cycle share a stamp; the regression velocity tolerates this, but a
+per-sample timing analysis should not assume evenly spaced samples.
 
 ## Dependencies
 
@@ -133,6 +169,8 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `serial_port` | string | *required* | Serial port device path (e.g., `/dev/ttyACM0`) |
 | `serial_baud` | uint32 | `115200` | Serial baud rate |
 | `max_speed_rad_per_sec` | double | `3.14` | Maximum dome angular velocity in rad/s (~180°/s) |
+| `publish_telemetry` | bool | `false` | Publish `astromech_msgs/DomeTelemetry` on `~/telemetry` for every position report |
+| `velocity_window_s` | double | `0.5` | Trailing regression window for the velocity estimate (s), must be > 0 |
 | `auto_mode` | bool | `false` | Enable AutoMode on device during startup |
 | `home_mode` | bool | `false` | Enable HomeMode on device during startup |
 | `startup_log_level` | string | `debug` | Log level for startup transitions (`debug` or `info`) |
@@ -432,7 +470,7 @@ For a complete list of commands and configuration options, refer to the [hardwar
 
 - Startup configuration uses a deterministic state machine to sequence status/config/report setup.
 - Position wraps around at 2π radians (360°).
-- Velocity state feedback is currently exported but not computed from hardware feedback yet.
+- Velocity state feedback is estimated on the host from the position stream; the firmware sends no velocity.
 - Read/write cycle timing is managed by the ROS2 controller manager.
 
 ## Testing

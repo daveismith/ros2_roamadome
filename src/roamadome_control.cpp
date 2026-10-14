@@ -294,8 +294,29 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  if (!parseOptionalBoolParameter(
+      parameters, logger_, "publish_telemetry", false, &publishTelemetry_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!parseOptionalDoubleParameter(
+      parameters,
+      logger_,
+      "velocity_window_s",
+      0.5,
+      [](double value) {return value > 0.0;},
+      "> 0",
+      &velocityWindowS_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  positionTracker_ = PositionTracker(velocityWindowS_);
+
   RCLCPP_INFO(logger_, "Maximum speed configured: %.4f rad/s (%.2f°/s)",
               maxSpeedRadPerSec_, radiansToDegrees(maxSpeedRadPerSec_));
+  RCLCPP_INFO(logger_, "Velocity estimate window: %.3f s; telemetry publishing %s",
+              velocityWindowS_, publishTelemetry_ ? "enabled" : "disabled");
   RCLCPP_INFO(logger_, "Startup timeouts: default=%u ms setup=%u ms report=%u ms retries=%u",
               startupDefaultTimeoutMs_, startupSetupTimeoutMs_, startupReportTimeoutMs_,
               startupMaxRetries_);
@@ -316,17 +337,33 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  RCLCPP_INFO(logger_, "Configuring RoamadomeControl from state: %s",
+      previous_state.label().c_str());
+
+  // Declare parameters before startup reads so config callbacks can safely update values.
+  declareDeviceParameters();
+
+  if (!openDeviceAndRunStartup()) {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  RCLCPP_INFO(logger_, "RoamadomeControl configured successfully");
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+bool RoamadomeControl::openDeviceAndRunStartup()
+{
+  if (0 == info_.rw_rate) {
+    RCLCPP_ERROR(logger_, "Invalid rw_rate: 0");
+    return false;
+  }
+
   const std::chrono::milliseconds baud_settle_sleep(baudSweepSleepMs_);
 
   const uint32_t cycle_ms = std::max<uint32_t>(1U, 1000U / info_.rw_rate);
   const uint32_t report_ms = (cycle_ms > 5U) ? (cycle_ms - 5U) : 1U;
 
-  RCLCPP_INFO(logger_, "Configuring RoamadomeControl from state: %s",
-      previous_state.label().c_str());
   RCLCPP_INFO(logger_, "Read Rate in Hz: %u (#DPREPORT%u)", info_.rw_rate, report_ms);
-
-  // Declare parameters before startup reads so config callbacks can safely update values.
-  declareDeviceParameters();
 
   // Create and setup the serial handler
   serialHandler_ = std::make_unique<RoamadomeSerialPort>(serialPort_);
@@ -339,7 +376,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
   // Open the serial port
   if (!serialHandler_->open()) {
     RCLCPP_ERROR(logger_, "Failed to open serial port: %s", serialPort_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
+    serialHandler_.reset();
+    return false;
   }
 
   const std::string baud_command = buildCommand("#DPSERIALBAUD", serialBaud_);
@@ -354,7 +392,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
       RCLCPP_ERROR(logger_, "Failed to configure serial port baud rate: %u", target_baud);
       serialHandler_->close();
       serialHandler_.reset();
-      return hardware_interface::CallbackReturn::ERROR;
+      return false;
     }
 
     for (size_t blankLineIndex = 0; blankLineIndex < 5; blankLineIndex++) {
@@ -366,7 +404,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
       RCLCPP_ERROR(logger_, "Failed to send baud configuration command at baud %u", target_baud);
       serialHandler_->close();
       serialHandler_.reset();
-      return hardware_interface::CallbackReturn::ERROR;
+      return false;
     }
 
     // Read any opportunistic feedback while sweeping baud rates.
@@ -378,7 +416,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
     RCLCPP_ERROR(logger_, "Failed to configure serial port baud rate: %u", serialBaud_);
     serialHandler_->close();
     serialHandler_.reset();
-    return hardware_interface::CallbackReturn::ERROR;
+    return false;
   }
   std::this_thread::sleep_for(baud_settle_sleep);
 
@@ -387,11 +425,10 @@ hardware_interface::CallbackReturn RoamadomeControl::on_configure(
       startupContext_.failure_reason.c_str());
     serialHandler_->close();
     serialHandler_.reset();
-    return hardware_interface::CallbackReturn::ERROR;
+    return false;
   }
 
-  RCLCPP_INFO(logger_, "RoamadomeControl configured successfully");
-  return hardware_interface::CallbackReturn::SUCCESS;
+  return true;
 }
 
 void RoamadomeControl::resetStartupContext(StartupContext * context, uint32_t timeout_ms)
@@ -934,6 +971,16 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
 
   ensureParameterCallbackRegistered(node);
 
+  // on_deactivate closes the serial port, and an inactive -> active transition
+  // does not pass through on_configure again, so reopen the device here.
+  if (!serialHandler_) {
+    RCLCPP_INFO(logger_, "Serial port is closed; reopening device and re-running startup");
+    if (!openDeviceAndRunStartup()) {
+      RCLCPP_ERROR(logger_, "Cannot activate RoamadomeControl: device bring-up failed");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+  }
+
   if (!setupService_) {
     setupService_ = node->create_service<std_srvs::srv::Trigger>(
       "~/setup",
@@ -963,6 +1010,22 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
       });
   }
 
+  // The unwrapped angle and sequence counter are "since activation".
+  positionTracker_.reset();
+  telemetrySequence_ = 0;
+  velocity_ = std::numeric_limits<double>::quiet_NaN();
+
+  {
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    telemetryClock_ = node->get_clock();
+    if (publishTelemetry_ && !telemetryPublisher_) {
+      telemetryPublisher_ = node->create_publisher<astromech_msgs::msg::DomeTelemetry>(
+        "~/telemetry", rclcpp::QoS(rclcpp::KeepLast(100)).reliable());
+      RCLCPP_INFO(logger_, "Publishing dome telemetry on %s",
+        telemetryPublisher_->get_topic_name());
+    }
+  }
+
   lifecycleActive_.store(true);
 
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -989,6 +1052,12 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
     periodicConfigTimer_.reset();
   }
 
+  {
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    telemetryPublisher_.reset();
+    telemetryClock_.reset();
+  }
+
   // Reset the send queue and related state to ensure a clean slate on next activation.
   {
     std::lock_guard<std::mutex> lock(sendQueue_mutex_);
@@ -1000,6 +1069,11 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   }
 
   if (serialHandler_) {
+    // Continuous rotation has no firmware watchdog, so never leave the dome
+    // turning when the interface goes inactive.
+    sendStopCommand();
+    currentMode_ = CommandMode::IDLE;
+    telemetryCommandMode_.store(telemetryCommandModeValue(CommandMode::IDLE));
     serialHandler_->sendCommand("#DPREPORT0");
     nanosleep(&ts, NULL);
     serialHandler_->close();
@@ -1202,6 +1276,7 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
   }
 
   currentMode_ = new_mode;
+  telemetryCommandMode_.store(telemetryCommandModeValue(new_mode));
 
   RCLCPP_INFO(logger_, "Command mode switched to: %s",
               currentMode_ == CommandMode::POSITION ? "POSITION" :
@@ -1269,7 +1344,11 @@ bool RoamadomeControl::sendVelocityCommand(int32_t percentage)
 
   // Format: :DPR<speed> where speed is -100 to 100
   std::string command = buildCommand(":DPR", percentage);
-  return serialHandler_->sendCommand(command);
+  if (!serialHandler_->sendCommand(command)) {
+    return false;
+  }
+  recordCommandedPercent(percentage);
+  return true;
 }
 
 bool RoamadomeControl::sendStopCommand()
@@ -1280,7 +1359,69 @@ bool RoamadomeControl::sendStopCommand()
   }
 
   // Send stop command: :DPR0 (0% velocity)
-  return serialHandler_->sendCommand(":DPR0");
+  if (!serialHandler_->sendCommand(":DPR0")) {
+    return false;
+  }
+  recordCommandedPercent(0);
+  return true;
+}
+
+void RoamadomeControl::recordCommandedPercent(int32_t percentage)
+{
+  const int32_t clamped = std::clamp<int32_t>(percentage, -100, 100);
+  lastCommandedPercent_.store(static_cast<int8_t>(clamped));
+}
+
+uint8_t RoamadomeControl::telemetryCommandModeValue(CommandMode mode)
+{
+  switch (mode) {
+    case CommandMode::POSITION:
+      return astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_POSITION;
+    case CommandMode::VELOCITY:
+      return astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_VELOCITY;
+    case CommandMode::IDLE:
+    default:
+      return astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_IDLE;
+  }
+}
+
+void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
+{
+  // Runs on the read path for every "DOME POSITION: <n>" line. Host receive
+  // time is the sample timestamp (firmware report jitter is ~1 ms).
+  const auto now_steady = std::chrono::steady_clock::now();
+  const PositionTracker::Estimate estimate = positionTracker_.update(
+    now_steady, static_cast<uint16_t>(degrees % 360));
+
+  position_ = radians;
+  velocity_ = estimate.velocity_rad_s;
+  ++telemetrySequence_;
+
+  RCLCPP_DEBUG(logger_, "Position updated: %u° = %.4f rad, unwrapped %.4f rad, velocity %.4f rad/s",
+    degrees, radians, estimate.unwrapped_rad, estimate.velocity_rad_s);
+
+  rclcpp::Publisher<astromech_msgs::msg::DomeTelemetry>::SharedPtr publisher;
+  rclcpp::Clock::SharedPtr clock;
+  {
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    publisher = telemetryPublisher_;
+    clock = telemetryClock_;
+  }
+  if (!publisher || !clock) {
+    return;
+  }
+
+  astromech_msgs::msg::DomeTelemetry msg;
+  msg.header.stamp = clock->now();
+  msg.header.frame_id = joint_name_;
+  msg.position_deg = static_cast<uint16_t>(degrees % 360);
+  msg.position_rad = estimate.position_rad;
+  msg.unwrapped_rad = estimate.unwrapped_rad;
+  msg.velocity_rad_s = estimate.velocity_rad_s;
+  msg.commanded_percent = lastCommandedPercent_.load();
+  msg.command_mode = telemetryCommandMode_.load();
+  msg.sequence = telemetrySequence_;
+  publisher->publish(msg);
 }
 
 void RoamadomeControl::declareDeviceParameters()
