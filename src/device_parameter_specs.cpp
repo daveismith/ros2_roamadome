@@ -81,7 +81,8 @@ std::vector<std::unique_ptr<DeviceParameterSpecBase>> buildParameterSpecs()
       "deceleration_scale", "DecelerationScale", "Deceleration scale (0-255)", "#DPDSCALE",
       50, 0, 255));
   specs.emplace_back(std::make_unique<WritableParameterSpec<uint8_t>>(
-      "timeout", "Timeout", "Position move timeout (1-30 seconds)", "#DPTIMEOUT", 5, 1, 30));
+      "timeout", "Timeout", "Position move timeout (1-30 seconds)", "#DPTIMEOUT", 5, 0, 30,
+      nullptr, 1));
   specs.emplace_back(std::make_unique<WritableParameterSpec<bool>>(
       "auto_mode", "AutoMode", "Enable/disable automatic dome movement mode", "#DPAUTO",
       false, false, true, getBoolTypeLambda<bool>()));

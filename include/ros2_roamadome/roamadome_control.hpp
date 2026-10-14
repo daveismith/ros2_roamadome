@@ -176,6 +176,7 @@ private:
   void handleSendQueueFeedback(const std::string & line);
   void logStartupTransition(const std::string & message);
   bool queueSetHomeHere(std::string * message);
+  bool rotationInProgress(std::string * reason) const;
   void enqueueConfigDumpWithInvalidLocked(const std::string & reason);
   void enqueueStatusPollWithInvalidLocked(const std::string & reason);
 

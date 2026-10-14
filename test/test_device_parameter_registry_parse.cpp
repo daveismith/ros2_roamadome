@@ -53,6 +53,29 @@ TEST(DeviceParameterRegistryParseTest, Parse_InvalidValueKeepsDefault)
   EXPECT_FALSE(auto_mode->currentParameter().as_bool());
 }
 
+TEST(DeviceParameterRegistryParseTest, Parse_TimeoutZeroIsAcceptedFromConfig)
+{
+  // The firmware stores Timeout=0 (no lower bound); only writes require >= 1.
+  const std::map<std::string, std::string> config_map = {
+    {"Timeout", "0"},
+    {"AutoMode", "1"}
+  };
+
+  const auto logger = rclcpp::get_logger("config_parser_test");
+  DeviceParameterRegistry registry;
+  EXPECT_TRUE(registry.parseConfigMap(config_map, logger));
+  const auto * timeout = findSpecByConfigKey(registry, "Timeout");
+  ASSERT_NE(timeout, nullptr);
+  EXPECT_EQ(timeout->currentParameter().as_int(), 0);
+
+  const auto * writable = registry.findWritableParameterSpec("timeout");
+  ASSERT_NE(writable, nullptr);
+  std::string command;
+  std::string reason;
+  EXPECT_FALSE(writable->validateAndBuildCommand(
+      rclcpp::Parameter("device.timeout", 0), &command, &reason));
+}
+
 TEST(DeviceParameterRegistryParseTest, Parse_ResetsMissingFieldsToDefaults)
 {
   const std::map<std::string, std::string> config_map = {

@@ -281,8 +281,15 @@ Writable parameters (ROS -> device):
 | `device.timeout` | int | `1..30` | `#DPTIMEOUT<n>` |
 
 The firmware clamps `#DPTIMEOUT` to 30 seconds, so larger values are rejected here rather than
-silently clamped. Changing `device.max_speed` stops the dome in the firmware; set speed
-parameters before rotating, not during a rotation. Every write persists to flash.
+silently clamped. The firmware can report `Timeout=0`, which is accepted when reading the config
+but rejected on write (`1..30`). Every write persists to flash.
+
+Writing a setting makes the firmware stop the drive (for example `setMaxSpeed` calls `stop()`), and
+a position move in flight is aborted by the firmware when any setting is written. The interface
+does not block the latter. It does reject `device.*` writes and `~/set_home_here` while a
+continuous rotation is commanded (last `:DPR` percent is non-zero), because `write()` only resends
+`:DPR` when the command changes and the dome would stay stopped while the controller believes it
+is driving. Stop the rotation first.
 
 Read-only parameters (from config snapshot parsing):
 
@@ -326,7 +333,8 @@ Parameter update behavior:
 - Non-writable `device.*` parameters are updated from device config reads and rejected if a user tries to set them directly.
 - Ack-tracked updates wait for `Write Settings` then `Updated` feedback from firmware. If the
   value is already set the firmware prints only `Unchanged`; that completes the ack immediately
-  and no config refresh is queued.
+  and no config refresh is queued. `Write Settings`, `Updated` and `Unchanged` acks are logged at
+  INFO.
 - After update ack, a config refresh (`#DPCONFIG` + `#DPINVALID`) is queued to synchronize all `device.*` values.
 - Device-to-ROS synchronization uses a thread-local callback bypass guard to avoid callback loops
   without dropping concurrent external writes from other threads.
@@ -344,6 +352,8 @@ Parameter update behavior:
   addresses stay read-only.
 - Verify a firmware `Unchanged` reply completes an ack-tracked write without a `#DPCONFIG` refresh
   or an ack timeout.
+- Verify settings writes and `~/set_home_here` are rejected while a rotation is commanded and
+  accepted after `:DPR0`.
 - Verify `~/set_home_here` queues `#DPHOMEPOS` and that `Write Settings` + `Updated` triggers a
   config refresh.
 
@@ -373,7 +383,7 @@ Services on the hardware node:
 | Service | Type | Effect |
 |---------|------|--------|
 | `~/setup` | `std_srvs/Trigger` | Sends `#DPSETUP` (one-shot) |
-| `~/set_home_here` | `std_srvs/Trigger` | Sends `#DPHOMEPOS`, ack-tracked; the current position becomes home and `device.home_pos` refreshes after the ack |
+| `~/set_home_here` | `std_srvs/Trigger` | Sends `#DPHOMEPOS`, ack-tracked; the current position becomes home and `device.home_pos` refreshes after the ack. `success=true` means only that the command was queued, not that the firmware acked it. Rejected while inactive, with the port closed, or while a rotation is commanded |
 
 ### Startup Configure Sequence
 
