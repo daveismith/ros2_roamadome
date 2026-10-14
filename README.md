@@ -453,6 +453,7 @@ This package is part of the R2 robotics project. See your repository's LICENSE f
 
 ## Additional Resources
 
+- [Dome diagnostics and telemetry plan](docs/dome_diagnostics_plan.md): bench sensor sweep, speed range measurement, and protocol features to expose
 - [ROS2 Hardware Interfaces](https://docs.ros.org/en/rolling/Concepts/Advanced/Hardware-Acceleration/Overview-of-hardware-interfaces.html)
 - [Roam-A-Dome Firmware (GitHub)](https://github.com/reeltwo/DomeControlFirmware)
 - [ROS2 Control Framework](https://control.ros.org/)
