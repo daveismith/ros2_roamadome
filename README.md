@@ -101,6 +101,33 @@ controller manager cycle (33 ms at 30 Hz) and two report lines that arrive in
 the same cycle share a stamp; the regression velocity tolerates this, but a
 per-sample timing analysis should not assume evenly spaced samples.
 
+### Diagnostics
+
+While active, the hardware interface publishes a `diagnostic_msgs/DiagnosticArray`
+on the global `/diagnostics` topic at 1 Hz with three statuses, all carrying the
+serial port path as `hardware_id`:
+
+| Status | OK | WARN | ERROR |
+|--------|----|------|-------|
+| `roamadome: link` | Position reports flowing | No report yet, or none for 0.5 s | Serial port closed, or `READY` seen while active (the controller rebooted) |
+| `roamadome: sensor` | Sensor error count steady | Count grew between the last two `#DPSTATUS` polls | |
+| `roamadome: motion` | No timeout outstanding | `ERROR: DOME POSITION TIMEOUT` more than 5 s ago and no `REACHED TARGET` / `REACHED HOME` since | `ERROR: DOME POSITION TIMEOUT` within the last 5 s |
+
+Values include the report and poll counters, the firmware's sensor and packet
+serial error counts, the last accepted `:DPR` percent, the last target and home
+reached, position timeouts, out-of-range rejections and the current command mode.
+
+The firmware's own counters come from `#DPSTATUS`, which the interface queues
+(followed by `#DPINVALID` to close the section) once on activation and then every
+`status_poll_interval_ms`; set it to `0` to disable polling. The console lines the
+firmware prints for accepted commands, finished moves, rejections and boot
+(`ROTATE SPEED`, `ROTARY DEGREE`, `REACHED TARGET`, `REACHED HOME`,
+`ERROR: DOME POSITION TIMEOUT`, `Out of range.`, `Unchanged`, `READY`, the
+`#DPSETUP` output and the reporting acks) are recognised by
+`classifyFirmwareLine()` in `include/ros2_roamadome/firmware_line_classifier.hpp`
+and folded into the diagnostics state; a position timeout and a reboot are also
+logged at WARN and ERROR respectively.
+
 ## Dependencies
 
 - **ROS2 Dependencies**:
@@ -171,6 +198,7 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `max_speed_rad_per_sec` | double | `3.14` | Maximum dome angular velocity in rad/s (~180°/s) |
 | `publish_telemetry` | bool | `false` | Publish `astromech_msgs/DomeTelemetry` on `~/telemetry` for every position report |
 | `velocity_window_s` | double | `0.5` | Trailing regression window for the velocity estimate (s), must be > 0 |
+| `status_poll_interval_ms` | uint32 | `10000` | Interval for the `#DPSTATUS` poll that feeds `/diagnostics`; `0` disables |
 | `auto_mode` | bool | `false` | Enable AutoMode on device during startup |
 | `home_mode` | bool | `false` | Enable HomeMode on device during startup |
 | `startup_log_level` | string | `debug` | Log level for startup transitions (`debug` or `info`) |

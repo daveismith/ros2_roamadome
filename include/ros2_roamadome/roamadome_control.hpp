@@ -4,8 +4,11 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "astromech_msgs/msg/dome_telemetry.hpp"
+#include "diagnostic_msgs/msg/diagnostic_array.hpp"
 
 #include "ros2_roamadome/device_parameter_specs.hpp"
+#include "ros2_roamadome/dome_diagnostics.hpp"
+#include "ros2_roamadome/firmware_line_classifier.hpp"
 #include "ros2_roamadome/position_tracker.hpp"
 #include "ros2_roamadome/visibility_control.h"
 #include "ros2_roamadome/roamadome_serial_port.hpp"
@@ -173,6 +176,7 @@ private:
   void handleSendQueueFeedback(const std::string & line);
   void logStartupTransition(const std::string & message);
   void enqueueConfigDumpWithInvalidLocked(const std::string & reason);
+  void enqueueStatusPollWithInvalidLocked(const std::string & reason);
 
   // Helper methods for command handling
   uint32_t normalizeAngleDegrees(double radians) const;
@@ -184,6 +188,11 @@ private:
 
   // Telemetry and velocity estimation
   void handlePositionReport(uint32_t degrees, double radians);
+
+  // Diagnostics
+  void handleClassifiedLine(const std::string & line);
+  void handleStatusSection(const std::vector<std::string> & status);
+  void publishDiagnostics();
   void recordCommandedPercent(int32_t percentage);
   static uint8_t telemetryCommandModeValue(CommandMode mode);
 
@@ -302,6 +311,15 @@ private:
   rclcpp::Clock::SharedPtr telemetryClock_;
   mutable std::mutex telemetry_mutex_;  // Protects telemetryPublisher_ and telemetryClock_
 
+  // Diagnostics (docs/dome_diagnostics_plan.md, phase 2). diagnosticsState_ is
+  // mutated from the serial read path and read by the 1 Hz timer.
+  uint32_t statusPollIntervalMs_ = 10000;
+  DomeDiagnosticsState diagnosticsState_;
+  mutable std::mutex diagnostics_mutex_;  // Protects diagnosticsState_
+  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnosticsPublisher_;
+  rclcpp::TimerBase::SharedPtr diagnosticsTimer_;
+  rclcpp::TimerBase::SharedPtr statusPollTimer_;
+
   // Inner class: Observer for serial port events
   class SerialEventHandler : public ISerialObserver
   {
@@ -327,6 +345,7 @@ public:
 
     void onUnhandledLine(const std::string & line) override
     {
+      controller_->handleClassifiedLine(line);
       controller_->handleSendQueueFeedback(line);
       controller_->handleStartupUnhandledLine(line);
       RCLCPP_DEBUG(controller_->logger_, "Unhandled serial line: %s", line.c_str());
@@ -372,6 +391,7 @@ public:
           controller_->startupContext_.auto_safety_engaged = false;
         }
       }
+      controller_->handleStatusSection(status);
     }
 
 private:

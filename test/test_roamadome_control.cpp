@@ -103,6 +103,12 @@ protected:
   double positionStateForTest() const {return controller_->position_;}
   double velocityStateForTest() const {return controller_->velocity_;}
 
+  DomeDiagnosticsState diagnosticsStateForTest() const
+  {
+    std::lock_guard<std::mutex> lock(controller_->diagnostics_mutex_);
+    return controller_->diagnosticsState_;
+  }
+
   std::unique_ptr<RoamadomeControl> controller_;
 };
 
@@ -1832,6 +1838,130 @@ TEST_F(RoamadomeControlTest, PositionReports_FillPositionAndVelocityState)
   EXPECT_NEAR(positionStateForTest(), 354.0 * M_PI / 180.0, 1e-9);
   ASSERT_FALSE(std::isnan(velocityStateForTest()));
   EXPECT_LT(velocityStateForTest(), 0.0);
+}
+
+/**
+ * ============================================================================
+ * FIRMWARE LINE -> DIAGNOSTICS STATE TESTS
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, FirmwareLines_UpdateDiagnosticsState)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  std::atomic<bool> running{true};
+  std::thread firmware([&]() {
+      std::string line;
+      while (running.load()) {
+        if (!pty.readLine(&line, 100)) {
+          continue;
+        }
+        if (line.rfind("#DPCONFIG", 0) == 0 || line.rfind("DPCONFIG", 0) == 0) {
+          pty.writeText(
+            "PROCESS: \"#DPCONFIG\"\n"
+            "AutoSafety=0\n"
+            "AutoMode=0\n"
+            "HomeMode=0\n");
+        } else if (line.rfind("#DPSTATUS", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPSTATUS\"\nAuto Safety Disengaged\nready\n");
+        } else if (line.rfind("#DPREPORT", 0) == 0) {
+          pty.writeText("PROCESS: \"" + line + "\"\n");
+        } else if (line.rfind("#DPINVALID", 0) == 0) {
+          pty.writeText("PROCESS: \"#DPINVALID\"\nInvalid\n");
+        }
+      }
+    });
+  FirmwareThreadGuard firmware_guard(&running, &firmware);
+
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+    "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state),
+    hardware_interface::CallbackReturn::SUCCESS);
+  setLifecycleActiveForTest(true);
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.028);
+
+  // The serial reader consumes at most 100 bytes per read() call, so give a
+  // multi-line section several read cycles to arrive.
+  auto feed = [&](const std::string & text) {
+      pty.writeText(text);
+      for (int cycle = 0; cycle < 6; ++cycle) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+      }
+    };
+
+  feed("ROTATE SPEED: 48\n");
+  feed("ERROR: DOME POSITION TIMEOUT\n");
+  {
+    const DomeDiagnosticsState state = diagnosticsStateForTest();
+    EXPECT_EQ(state.position_timeouts, 1u);
+    EXPECT_FALSE(state.move_succeeded_since_timeout);
+    ASSERT_TRUE(state.last_accepted_rotate_percent.has_value());
+    EXPECT_EQ(*state.last_accepted_rotate_percent, 48);
+  }
+
+  feed("ROTARY DEGREE: 180 speed: 0.50\nREACHED TARGET: 180\n");
+  {
+    const DomeDiagnosticsState state = diagnosticsStateForTest();
+    EXPECT_TRUE(state.move_succeeded_since_timeout);
+    ASSERT_TRUE(state.last_target_reached_deg.has_value());
+    EXPECT_EQ(*state.last_target_reached_deg, 180);
+    EXPECT_EQ(*state.last_rotary_target_deg, 180);
+  }
+
+  // A status poll response is delivered as a section; the probe reply closes it.
+  feed(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Auto Safety Disengaged\n"
+    "Packet Serial Errors: 2\n"
+    "Dome Sensor Errors: 3\n"
+    "PROCESS: \"#DPINVALID\"\n"
+    "Invalid\n");
+  {
+    const DomeDiagnosticsState state = diagnosticsStateForTest();
+    ASSERT_TRUE(state.sensor_errors.has_value());
+    EXPECT_EQ(*state.sensor_errors, 3u);
+    EXPECT_EQ(*state.packet_serial_errors, 2u);
+    EXPECT_FALSE(state.sensor_errors_increased);
+  }
+
+  feed(
+    "PROCESS: \"#DPSTATUS\"\n"
+    "Auto Safety Disengaged\n"
+    "Dome Sensor Errors: 4\n"
+    "PROCESS: \"#DPINVALID\"\n"
+    "Invalid\n");
+  {
+    const DomeDiagnosticsState state = diagnosticsStateForTest();
+    EXPECT_EQ(*state.sensor_errors, 4u);
+    EXPECT_EQ(*state.packet_serial_errors, 0u);
+    EXPECT_TRUE(state.sensor_errors_increased);
+  }
+
+  // READY while active means the controller rebooted.
+  feed("READY\n");
+  EXPECT_TRUE(diagnosticsStateForTest().reboot_detected);
+
+  // Position reports are counted for the link status.
+  feed("DOME POSITION: 12\n");
+  EXPECT_EQ(diagnosticsStateForTest().position_reports, 1u);
 }
 
 }  // namespace ros2_roamadome

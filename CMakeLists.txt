@@ -18,6 +18,7 @@ find_package(rclcpp REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(astromech_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 
 # build library
 add_library(ros2_roamadome
@@ -25,6 +26,8 @@ add_library(ros2_roamadome
   src/device_parameter_specs.cpp
   src/roamadome_serial_port.cpp
   src/parameter_parser.cpp
+  src/firmware_line_classifier.cpp
+  src/dome_diagnostics.cpp
 )
 add_library(ros2_roamadome::roamadome_control ALIAS ros2_roamadome)
 target_compile_features(ros2_roamadome PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
@@ -42,6 +45,7 @@ ament_target_dependencies(ros2_roamadome PUBLIC
   pluginlib
   std_srvs
   astromech_msgs
+  diagnostic_msgs
 )
 pluginlib_export_plugin_description_file(hardware_interface robot_hardware.xml)
 
@@ -101,6 +105,22 @@ if(BUILD_TESTING)
     $<INSTALL_INTERFACE:include>
   )
 
+  # Unit tests for the firmware console line classifier
+  ament_add_gtest(test_firmware_line_classifier test/test_firmware_line_classifier.cpp)
+  target_include_directories(test_firmware_line_classifier PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_firmware_line_classifier ros2_roamadome)
+
+  # Unit tests for the diagnostics state and status builder
+  ament_add_gtest(test_dome_diagnostics test/test_dome_diagnostics.cpp)
+  target_include_directories(test_dome_diagnostics PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(test_dome_diagnostics ros2_roamadome)
+
   # Unit tests for DeviceParameterSpecs
   ament_add_gtest(test_device_parameter_specs test/test_device_parameter_specs.cpp)
   target_include_directories(test_device_parameter_specs PUBLIC
@@ -136,6 +156,7 @@ ament_export_dependencies(
   pluginlib
   std_srvs
   astromech_msgs
+  diagnostic_msgs
 )
 
 ament_package()
