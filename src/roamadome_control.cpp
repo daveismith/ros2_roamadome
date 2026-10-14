@@ -313,10 +313,24 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   }
   positionTracker_ = PositionTracker(velocityWindowS_);
 
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "status_poll_interval_ms",
+      10000,
+      nullptr,
+      "",
+      &statusPollIntervalMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   RCLCPP_INFO(logger_, "Maximum speed configured: %.4f rad/s (%.2f°/s)",
               maxSpeedRadPerSec_, radiansToDegrees(maxSpeedRadPerSec_));
   RCLCPP_INFO(logger_, "Velocity estimate window: %.3f s; telemetry publishing %s",
               velocityWindowS_, publishTelemetry_ ? "enabled" : "disabled");
+  RCLCPP_INFO(logger_, "Diagnostics status poll interval: %u ms%s",
+              statusPollIntervalMs_, statusPollIntervalMs_ == 0 ? " (disabled)" : "");
   RCLCPP_INFO(logger_, "Startup timeouts: default=%u ms setup=%u ms report=%u ms retries=%u",
               startupDefaultTimeoutMs_, startupSetupTimeoutMs_, startupReportTimeoutMs_,
               startupMaxRetries_);
@@ -899,6 +913,16 @@ void RoamadomeControl::enqueueConfigDumpWithInvalidLocked(const std::string & re
   sendQueue_.push({reason + " #DPINVALID", "#DPINVALID", SendQueueCommand::Flow::ONE_SHOT, false});
 }
 
+void RoamadomeControl::enqueueStatusPollWithInvalidLocked(const std::string & reason)
+{
+  // #DPINVALID ends the STATUS section promptly instead of waiting for the
+  // section flush timeout, exactly as the config dump does.
+  sendQueue_.push(
+    {reason + " status poll #DPSTATUS", "#DPSTATUS", SendQueueCommand::Flow::ONE_SHOT, false});
+  sendQueue_.push(
+    {reason + " status poll #DPINVALID", "#DPINVALID", SendQueueCommand::Flow::ONE_SHOT, false});
+}
+
 void RoamadomeControl::handleSendQueueFeedback(const std::string & line)
 {
   std::lock_guard<std::mutex> lock(sendQueue_mutex_);
@@ -1015,6 +1039,36 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
   telemetrySequence_ = 0;
   velocity_ = std::numeric_limits<double>::quiet_NaN();
 
+  // Diagnostics: fresh counters per activation, published at 1 Hz on the
+  // global /diagnostics topic, with a periodic #DPSTATUS poll for the
+  // firmware's own error counters.
+  {
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    diagnosticsState_ = DomeDiagnosticsState();
+  }
+  if (!diagnosticsPublisher_) {
+    diagnosticsPublisher_ = node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+      "/diagnostics", rclcpp::QoS(rclcpp::KeepLast(10)));
+  }
+  if (!diagnosticsTimer_) {
+    diagnosticsTimer_ = node->create_wall_timer(
+      std::chrono::seconds(1), [this]() {publishDiagnostics();});
+  }
+  if (statusPollIntervalMs_ > 0) {
+    {
+      std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+      enqueueStatusPollWithInvalidLocked("activation");
+    }
+    if (!statusPollTimer_) {
+      statusPollTimer_ = node->create_wall_timer(
+        std::chrono::milliseconds(statusPollIntervalMs_),
+        [this]() {
+          std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+          enqueueStatusPollWithInvalidLocked("periodic");
+        });
+    }
+  }
+
   {
     std::lock_guard<std::mutex> lock(telemetry_mutex_);
     telemetryClock_ = node->get_clock();
@@ -1057,6 +1111,16 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
     telemetryPublisher_.reset();
     telemetryClock_.reset();
   }
+
+  if (diagnosticsTimer_) {
+    diagnosticsTimer_->cancel();
+    diagnosticsTimer_.reset();
+  }
+  if (statusPollTimer_) {
+    statusPollTimer_->cancel();
+    statusPollTimer_.reset();
+  }
+  diagnosticsPublisher_.reset();
 
   // Reset the send queue and related state to ensure a clean slate on next activation.
   {
@@ -1397,6 +1461,11 @@ void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
   velocity_ = estimate.velocity_rad_s;
   ++telemetrySequence_;
 
+  {
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    recordPositionReport(&diagnosticsState_, now_steady);
+  }
+
   RCLCPP_DEBUG(logger_, "Position updated: %u° = %.4f rad, unwrapped %.4f rad, velocity %.4f rad/s",
     degrees, radians, estimate.unwrapped_rad, estimate.velocity_rad_s);
 
@@ -1421,6 +1490,78 @@ void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
   msg.commanded_percent = lastCommandedPercent_.load();
   msg.command_mode = telemetryCommandMode_.load();
   msg.sequence = telemetrySequence_;
+  publisher->publish(msg);
+}
+
+void RoamadomeControl::handleClassifiedLine(const std::string & raw_line)
+{
+  const FirmwareLine line = classifyFirmwareLine(raw_line);
+  if (FirmwareLineKind::UNKNOWN == line.kind) {
+    return;
+  }
+
+  const bool active = lifecycleActive_.load();
+  const auto now = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    applyFirmwareLine(&diagnosticsState_, line, now, active);
+  }
+
+  switch (line.kind) {
+    case FirmwareLineKind::POSITION_TIMEOUT:
+      RCLCPP_WARN(logger_, "Firmware aborted the dome move: no position change within its timeout");
+      break;
+    case FirmwareLineKind::READY:
+      if (active) {
+        RCLCPP_ERROR(logger_,
+          "Dome controller rebooted (READY seen while active); settings and reporting may be reset");
+      }
+      break;
+    case FirmwareLineKind::OUT_OF_RANGE:
+      RCLCPP_WARN(logger_, "Firmware rejected a value as out of range");
+      break;
+    case FirmwareLineKind::SETUP_FAILED:
+      RCLCPP_WARN(logger_, "Firmware reported AUTO SETUP FAILED");
+      break;
+    case FirmwareLineKind::INVALID:
+      // Routine: every #DPINVALID probe produces one.
+      break;
+    default:
+      RCLCPP_DEBUG(logger_, "Firmware line %s: %s", firmwareLineKindName(line.kind),
+        raw_line.c_str());
+      break;
+  }
+}
+
+void RoamadomeControl::handleStatusSection(const std::vector<std::string> & status)
+{
+  std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+  applyStatusSection(&diagnosticsState_, status, std::chrono::steady_clock::now());
+}
+
+void RoamadomeControl::publishDiagnostics()
+{
+  auto publisher = diagnosticsPublisher_;
+  auto node = get_node();
+  if (!publisher || !node) {
+    return;
+  }
+
+  DomeDiagnosticsReadings readings;
+  readings.hardware_id = serialPort_;
+  readings.serial_open = serialHandler_ && serialHandler_->isOpen();
+  readings.position_rad = position_;
+  readings.velocity_rad_s = velocity_;
+  readings.commanded_percent = lastCommandedPercent_.load();
+  readings.command_mode = telemetryCommandMode_.load();
+
+  diagnostic_msgs::msg::DiagnosticArray msg;
+  msg.header.stamp = node->now();
+  {
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    msg.status = buildDomeDiagnostics(
+      diagnosticsState_, readings, DomeDiagnosticsOptions(), std::chrono::steady_clock::now());
+  }
   publisher->publish(msg);
 }
 
