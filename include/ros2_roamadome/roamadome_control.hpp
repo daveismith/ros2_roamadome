@@ -194,7 +194,8 @@ private:
     const std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Request> request,
     std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Response> response);
   void serviceBenchDrive();
-  void stopBenchDrive(const char * reason);
+  bool stopBenchDrive(const char * reason);  // false if :DPR0 could not be sent; state kept
+  void resetBenchState();
   void updateTelemetryModeLocked();  // requires bench_mutex_
 
   // Telemetry and velocity estimation
@@ -317,7 +318,8 @@ private:
   bool enableBenchMode_ = false;
   uint32_t benchHeartbeatTimeoutMs_ = 1500;
   rclcpp::Service<astromech_msgs::srv::DomeBenchDrive>::SharedPtr benchDriveService_;
-  std::mutex bench_mutex_;
+  mutable std::mutex bench_mutex_;
+  rclcpp::Clock throttleClock_{RCL_STEADY_TIME};
   bool benchActive_ = false;
   int32_t benchPendingPercent_ = 0;
   int32_t benchLastSentPercent_ = 0;

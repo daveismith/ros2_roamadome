@@ -937,12 +937,19 @@ void RoamadomeControl::enqueueConfigDumpWithInvalidLocked(const std::string & re
 bool RoamadomeControl::rotationInProgress(std::string * reason) const
 {
   const int percent = lastCommandedPercent_.load();
-  if (0 == percent) {
-    return false;
+  if (0 != percent) {
+    *reason = "dome is rotating (commanded " + std::to_string(percent) +
+      "%); stop it before changing settings";
+    return true;
   }
-  *reason = "dome is rotating (commanded " + std::to_string(percent) +
-    "%); stop it before changing settings";
-  return true;
+  // A bench drive that has been accepted but not yet sent counts as rotating.
+  std::lock_guard<std::mutex> lock(bench_mutex_);
+  if (benchActive_ && (benchPendingPercent_ != 0 || benchLastSentPercent_ != 0)) {
+    *reason = "a bench drive is active (pending " + std::to_string(benchPendingPercent_) +
+      "%); stop it before changing settings";
+    return true;
+  }
+  return false;
 }
 
 bool RoamadomeControl::queueSetHomeHere(std::string * message)
@@ -1080,6 +1087,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
     sendQueueCommandActive_ = false;
     sendQueueStage_ = SendQueueStage::IDLE;
   }
+  resetBenchState();
 
   // on_deactivate closes the serial port, and an inactive -> active transition
   // does not pass through on_configure again, so reopen the device here.
@@ -1245,13 +1253,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
     // turning when the interface goes inactive.
     sendStopCommand();
     currentMode_ = CommandMode::IDLE;
-    {
-      std::lock_guard<std::mutex> lock(bench_mutex_);
-      benchActive_ = false;
-      benchPendingPercent_ = 0;
-      benchLastSentPercent_ = 0;
-      updateTelemetryModeLocked();
-    }
+    resetBenchState();
     serialHandler_->sendCommand("#DPREPORT0");
     nanosleep(&ts, NULL);
     serialHandler_->close();
@@ -1311,6 +1313,11 @@ hardware_interface::return_type RoamadomeControl::write(
   }
 
   std::optional<SendQueueCommand> queued_command;
+  bool benchBusy = false;
+  if (enableBenchMode_) {
+    std::lock_guard<std::mutex> lock(bench_mutex_);
+    benchBusy = benchActive_;
+  }
 
   // Process queue bookkeeping under lock.
   {
@@ -1335,8 +1342,19 @@ hardware_interface::return_type RoamadomeControl::write(
     }
 
     if (!sendQueueCommandActive_ && !sendQueue_.empty()) {
-      queued_command = sendQueue_.front();
-      sendQueue_.pop();
+      // While a bench drive is active, settings writes must wait (the firmware
+      // stops the motor on them); one-shot queries may still go. Rotate through
+      // the queue once to find the first sendable command.
+      for (size_t n = sendQueue_.size(); n > 0; --n) {
+        if (benchBusy && sendQueue_.front().flow == SendQueueCommand::Flow::PARAMETER_UPDATE_ACK) {
+          sendQueue_.push(sendQueue_.front());
+          sendQueue_.pop();
+          continue;
+        }
+        queued_command = sendQueue_.front();
+        sendQueue_.pop();
+        break;
+      }
     }
   }
 
@@ -1451,8 +1469,10 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
   }
 
   // A bench drive must never run under a controller: stop it first.
-  if (new_mode != CommandMode::IDLE) {
-    stopBenchDrive("controller started");
+  if (new_mode != CommandMode::IDLE && !stopBenchDrive("controller started")) {
+    RCLCPP_ERROR(logger_,
+      "Refusing controller start: the bench drive could not be stopped (:DPR0 failed)");
+    return return_type::ERROR;
   }
 
   // If switching away from an active mode, send stop command
@@ -1527,7 +1547,8 @@ bool RoamadomeControl::sendPositionCommand(uint32_t degrees)
 bool RoamadomeControl::sendVelocityCommand(int32_t percentage)
 {
   if (!serialHandler_ || !serialHandler_->isOpen()) {
-    RCLCPP_WARN(logger_, "Serial handler not available for velocity command");
+    RCLCPP_WARN_THROTTLE(logger_, throttleClock_, 1000,
+      "Serial handler not available for velocity command");
     return false;
   }
 
@@ -1562,6 +1583,25 @@ void RoamadomeControl::handleBenchDrive(
     return;
   }
   const int32_t percent = std::clamp<int32_t>(request->percent, -100, 100);
+  if (percent != 0) {
+    // A settings write that reaches the firmware stops the motor (plan 2.3) and
+    // would never be resent, so do not start a drive while one is in flight.
+    bool settings_in_flight = false;
+    {
+      std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+      settings_in_flight = sendQueueCommandActive_;
+      auto queue_copy = sendQueue_;
+      while (!settings_in_flight && !queue_copy.empty()) {
+        settings_in_flight =
+          queue_copy.front().flow == SendQueueCommand::Flow::PARAMETER_UPDATE_ACK;
+        queue_copy.pop();
+      }
+    }
+    if (settings_in_flight) {
+      response->message = "a settings write is in flight; bench drive rejected";
+      return;
+    }
+  }
   {
     std::lock_guard<std::mutex> lock(bench_mutex_);
     if (currentMode_ != CommandMode::IDLE) {
@@ -1569,7 +1609,9 @@ void RoamadomeControl::handleBenchDrive(
         "bench drive rejected";
       return;
     }
-    if (!benchActive_ && percent == 0 && benchLastSentPercent_ == 0) {
+    if (!benchActive_ && percent == 0 && benchLastSentPercent_ == 0 &&
+      lastCommandedPercent_.load() == 0)
+    {
       response->success = true;
       response->message = "bench drive already stopped";
       return;
@@ -1584,24 +1626,37 @@ void RoamadomeControl::handleBenchDrive(
     std::to_string(benchHeartbeatTimeoutMs_) + " ms to keep the dome turning";
 }
 
-void RoamadomeControl::stopBenchDrive(const char * reason)
+void RoamadomeControl::resetBenchState()
 {
-  // Controller manager thread. Sends :DPR0 if a non-zero percent was sent, then
-  // clears all bench state.
+  std::lock_guard<std::mutex> lock(bench_mutex_);
+  benchActive_ = false;
+  benchPendingPercent_ = 0;
+  benchLastSentPercent_ = 0;
+  updateTelemetryModeLocked();
+}
+
+bool RoamadomeControl::stopBenchDrive(const char * reason)
+{
+  // Controller manager thread. Sends :DPR0 if a non-zero percent was sent and
+  // clears the bench state only once that succeeded. On failure the state is
+  // kept (pending 0) so write() retries every cycle.
   bool need_stop = false;
   {
     std::lock_guard<std::mutex> lock(bench_mutex_);
     need_stop = benchActive_ && benchLastSentPercent_ != 0;
   }
   if (need_stop) {
-    RCLCPP_WARN(logger_, "Bench drive stopped (%s); sending :DPR0", reason);
-    sendStopCommand();
+    if (!sendStopCommand()) {
+      RCLCPP_ERROR_THROTTLE(logger_, throttleClock_, 1000,
+        "Bench drive stop (%s) failed: could not send :DPR0; will retry", reason);
+      std::lock_guard<std::mutex> lock(bench_mutex_);
+      benchPendingPercent_ = 0;
+      return false;
+    }
+    RCLCPP_WARN(logger_, "Bench drive stopped (%s); sent :DPR0", reason);
   }
-  std::lock_guard<std::mutex> lock(bench_mutex_);
-  benchActive_ = false;
-  benchPendingPercent_ = 0;
-  benchLastSentPercent_ = 0;
-  updateTelemetryModeLocked();
+  resetBenchState();
+  return true;
 }
 
 void RoamadomeControl::serviceBenchDrive()
@@ -1619,9 +1674,15 @@ void RoamadomeControl::serviceBenchDrive()
       action = Action::CONTROLLER;
     } else if (now - benchLastCallTime_ > std::chrono::milliseconds(benchHeartbeatTimeoutMs_)) {
       action = Action::EXPIRE;
-    } else if (benchPendingPercent_ != benchLastSentPercent_) {
+    } else if (benchPendingPercent_ != benchLastSentPercent_ ||
+      (benchPendingPercent_ == 0 && lastCommandedPercent_.load() != 0))
+    {
       action = Action::SEND;
       percent = benchPendingPercent_;
+    } else if (benchPendingPercent_ == 0) {
+      // Pending and last-sent are both 0: nothing to hold, go back to idle now.
+      benchActive_ = false;
+      updateTelemetryModeLocked();
     }
   }
 
@@ -1631,7 +1692,10 @@ void RoamadomeControl::serviceBenchDrive()
     stopBenchDrive("heartbeat expired");
   } else if (action == Action::SEND) {
     const bool sent = percent == 0 ? sendStopCommand() : sendVelocityCommand(percent);
-    if (sent) {
+    if (!sent) {
+      RCLCPP_ERROR_THROTTLE(logger_, throttleClock_, 1000,
+        "Bench drive: failed to send :DPR%d; will retry", percent);
+    } else {
       std::lock_guard<std::mutex> lock(bench_mutex_);
       benchLastSentPercent_ = percent;
       if (percent == 0 && benchPendingPercent_ == 0) {
@@ -1645,7 +1709,8 @@ void RoamadomeControl::serviceBenchDrive()
 bool RoamadomeControl::sendStopCommand()
 {
   if (!serialHandler_ || !serialHandler_->isOpen()) {
-    RCLCPP_WARN(logger_, "Serial handler not available for stop command");
+    RCLCPP_WARN_THROTTLE(logger_, throttleClock_, 1000,
+      "Serial handler not available for stop command");
     return false;
   }
 
