@@ -293,10 +293,24 @@ firmware's `MaxSpeed`, `MinSpeed`, `SpeedTarget` or `Scaling`.
 
 Worked example: this is exactly the situation on the bench robot. The first sweeps
 (2026-10-14, [docs/bench_results/2026-10-14-no-dome-baseline.md](docs/bench_results/2026-10-14-no-dome-baseline.md))
-were taken with **no dome installed**, the motor driving only the bare base platform. Those
-numbers are the no-dome baseline, kept for comparison only. When the dome is mounted, run both
-sweeps again as below and configure the plugin with the **assembled-dome** values; replace any
-`velocity_map.*` and `max_speed_rad_per_sec` values that came from the baseline.
+were taken with **no dome installed**, the motor driving only the bare base platform. The same
+sweeps were then repeated with the dome mounted
+([docs/bench_results/2026-10-14-with-dome.md](docs/bench_results/2026-10-14-with-dome.md), with a
+side-by-side comparison). **The with-dome values are the ones to configure**; the no-dome numbers
+are kept for comparison only, and any `velocity_map.*` or `max_speed_rad_per_sec` value taken from
+them must be replaced. With the dome:
+
+- `max_speed_rad_per_sec` **6.56** (the lower measured 100 % rate; the JSON's fit value is 6.77);
+- `positive_velocity`: `percent_sign` -1, `k_percent_per_rad_s` 11.76, `p0_percent` 20.01;
+- `negative_velocity`: `percent_sign` +1, `k_percent_per_rad_s` 11.72, `p0_percent` 20.73;
+- `min_percent` **32** in both directions: the `phase7` block says 27 (raw-motor run), but at the
+  operating settings ±30 % stalled and 32 % was needed (see (b)).
+
+The dome barely changed the steady-state speeds (100 %: 6.61 / 6.56 rad/s against 6.35 / 6.84
+without it) but doubled the step response time (median 1.27 s against 0.63 s to 90 %). The sensor
+sweep did **not** pass with the dome. Position spikes appeared at fixed angles (true ~240 deg
+reading ~275 deg, and later true ~200 deg reading ~13 deg), which need the mechanical check in (b)
+and a sensor sweep re-run.
 
 **(a) Prerequisites and safety.**
 
@@ -346,7 +360,8 @@ A run passes when:
   `settings_before.json`, see above);
 - speed sweep: `angle_sign_consistent` true; in both `directions`, a 100 % step moved,
   `min_percent_bracketed` true, `stalled_above_min_percent` and `wrong_direction_steps` empty,
-  and `fit.r_squared` about 0.99 (0.994 and 0.997 on the baseline);
+  and `fit.r_squared` about 0.99 (0.994 and 0.997 on the no-dome baseline, 0.991 and 0.991 with
+  the dome);
 - sensor sweep: `config.max_plausible_source` names the speed sweep just run, and
   `suggested_pass` true (no jumps, no reversals). Jumps that cluster in the
   `jump_start_histogram` point at a misaligned sensor track: fix the mechanics and re-run the
@@ -355,9 +370,13 @@ A run passes when:
 
 The speed sweep runs with `speed_sweep.raw_motor` true by default (MaxSpeed 100, SpeedTarget
 100, Scaling off during the sweep), but the plugin drives the dome at the operating settings.
-On the 2026-10-14 firmware the two gave the same results (MaxSpeed had no measurable effect on
-`:DPR`), so the raw fit applies. Check it again after a firmware change: run a second speed
-sweep at the operating settings and compare. If they differ, use the operating-settings run:
+On the 2026-10-14 firmware MaxSpeed 80 does not scale `:DPR` to 80 %: without the dome the two
+runs gave the same results, and with the dome the speeds from 50 % up agreed within 6 % (within
+1 % at 80 to 100 %). With the dome, however, the operating-settings run stalled at ±30 % and
+needed 32 %, where the raw run moved at 27 %. The run cannot tell whether that is a small MaxSpeed
+effect at the low end or position-dependent scatter. Use the raw run's `k` and `p0` and the
+operating run's `min_percent`. Always run this second speed sweep at the operating settings and
+compare; where they differ, use the operating-settings run:
 
 ```bash
 ros2 param set /roamadome_bench speed_sweep.raw_motor false
@@ -392,8 +411,8 @@ value per direction; use the per-direction parameter names exactly as listed in
 [Configuration Parameters](#configuration-parameters) once phase 7 has merged, and if only one
 set is supported, take the larger `min_percent` and `p0_percent` of the two. For
 `max_speed_rad_per_sec` use the measured 100 % values, not `phase7.max_speed_rad_per_sec`,
-which is the lower of the two fit extrapolations k (100 - p0) (6.50 against a measured 6.35
-rad/s on the baseline).
+which is the lower of the two fit extrapolations k (100 - p0) (6.77 against a measured 6.56
+rad/s with the dome, 6.50 against 6.35 on the no-dome baseline).
 
 Sign convention: on the bench robot (firmware `Inverted` true) a **positive** percent moves the
 reported angle **down**, so positive joint velocity needs a negative percent
@@ -445,9 +464,13 @@ Pass: the mean is between 0.45 and 0.55 for +0.5 and between -0.55 and -0.45 for
 `ros2 topic pub --once ... "{data: [0.0]}"`, `ros2 control set_controller_state dome_controller
 inactive` and `ros2 control unload_controller dome_controller`, and relaunch without
 `dome_bench` for normal use. If 0.5 rad/s is below `velocity_at_min_percent_rad_s` of a
-direction, the mapping clamps up to `min_percent` and the check cannot pass in that direction;
-on the no-dome baseline it was marginal (0.55 and 0.63 rad/s at the minimum percentages).
-Record the result in the bench report.
+direction, the mapping clamps up to `min_percent` and the check cannot pass in that direction.
+On the no-dome baseline it was marginal (0.55 and 0.63 rad/s at the minimum percentages). **With
+the dome, 0.5 rad/s is not reachable**: the fit puts it at 25.9 % / 26.6 %, below the minimum.
+27 % gives only 0.19 / 0.41 rad/s with stick-slip (raw motor). At the operating settings 30 %
+stalls and 32 % gives 0.74 to 1.0 rad/s. The slowest dependable speed is about 1 rad/s, so the
+acceptance point has to move above it, for example to 1.0 rad/s (a decision for the human, plan
+section 10). Record the result in the bench report.
 
 **(e) The firmware settings are part of the calibration.** `MaxSpeed`, `SpeedTarget`,
 `MinSpeed` and `Scaling` all sit between the percent the plugin sends and the motor
@@ -459,7 +482,7 @@ firmware menu or `#DP` commands, invalidates the fit: re-run (b) to (d).
 **(f) Until phase 7 lands** the plugin still uses the linear mapping
 `percent = velocity / max_speed_rad_per_sec * 100`, rounded and clamped to ±100, with the sign
 passed straight through (so on the bench robot a positive velocity command moves the joint
-negative) and no minimum-percent handling (below about 25 % the dome stalls). Only
+negative) and no minimum-percent handling (with the dome, below about 30 % the dome stalls). Only
 `max_speed_rad_per_sec` applies; set it to the measured rate at 100 % so that full scale
 matches. The `velocity_map.*` values stay in the bench report until the plugin accepts them.
 
