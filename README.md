@@ -38,6 +38,7 @@ ros2_roamadome/
 │   └── roamadome_control_node.cpp # Standalone node (if applicable)
 ├── ros2_roamadome/bench/
 │   ├── analysis.py                # Bench analysis, pure Python (no ROS imports)
+│   ├── control.py                 # Node safety logic: sweep claim, drive gate, validation
 │   └── node.py                    # roamadome_bench node
 ├── scripts/
 │   ├── roamadome_bench            # ros2 run entry point for the node
@@ -168,13 +169,17 @@ pushing the bench node into a matching namespace. It uses `<hardware_node>/telem
 `<hardware_node>/bench/drive` and `<hardware_node>/{get,set}_parameters`.
 
 Parameters (read when a sweep starts, except `hardware_node` and `heartbeat_period_s`, which
-are read at startup):
+are read at startup and cannot be changed while the node runs). Invalid values are rejected,
+not corrected: at startup the node exits with an error listing them, and a later
+`ros2 param set` with an invalid value fails. Percent lists must be integers in 1..100,
+strictly ascending without duplicates; settle times must be >= 0; durations and thresholds
+> 0; `speed_sweep.min_measure_s` <= `speed_sweep.max_measure_s`.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `hardware_node` | `roamadome` | Hardware node name (a leading `/` is added if missing) |
 | `output_dir` | `~/dome_bench` | One subdirectory per run, named `<YYYYmmdd-HHMMSS>-<sweep>` |
-| `heartbeat_period_s` | `0.5` | Re-send the current percent this often (the plugin stops after `bench_heartbeat_timeout_ms`, 1.5 s by default) |
+| `heartbeat_period_s` | `0.5` | Re-send the current percent this often; must be in (0, 1.0] s (the plugin stops after `bench_heartbeat_timeout_ms`, 1.5 s by default) |
 | `velocity_window_s` | `0.5` | Regression window for the per-sample velocity in the analysis (same rule as the plugin) |
 | `sensor_sweep.percents` | `[20, 35, 50, 75, 100]` | Run lowest first, each `+p` then `-p` |
 | `sensor_sweep.settle_s` | `2.0` | Settle before the measure phase (addition to plan 5.4) |
@@ -192,7 +197,7 @@ Services and topics on the bench node:
 
 | Name | Type | Notes |
 |------|------|-------|
-| `~/start_sensor_sweep` | `std_srvs/Trigger` | Rejected if a sweep runs, telemetry is not flowing, the hardware is not idle (`command_mode` 0, `commanded_percent` 0) or a hardware service is missing |
+| `~/start_sensor_sweep` | `std_srvs/Trigger` | Rejected if a sweep runs or is starting (the slot is claimed atomically), telemetry is not flowing, the hardware is not idle (`command_mode` 0, `commanded_percent` 0) or a hardware service is missing |
 | `~/start_speed_sweep` | `std_srvs/Trigger` | Same checks |
 | `~/abort` | `std_srvs/Trigger` | Returns at once; the worker stops the dome, restores settings and writes partial results |
 | `~/status` | `std_msgs/String` | JSON at 2 Hz: state, sweep, run directory, phase, step, percent, direction, elapsed, counts so far, last result |
@@ -201,9 +206,14 @@ Every sweep follows the same lifecycle: save `device.max_speed`, `min_speed`, `s
 and `scaling` to `settings_before.json` (with the `ros2 param set` commands that restore them);
 with `raw_motor`, write the raw settings at standstill and read each back (a value already set
 is not written again, since every write goes to flash). The plugin accepts a parameter write
-before the firmware acks it, so the read-back only confirms the request; the first drive of
-the sweep is then retried for up to 12 s while the plugin rejects it because a settings write
-is still in flight, which is the bench node's sign that the firmware acked. Then the steps
+before the firmware acks it, so the read-back only confirms the ROS value. The node therefore
+also waits (up to 10 s) for the firmware acks the plugin reports on `/diagnostics`
+(`roamadome: motion` values `settings_writes_pending`, `settings_acks`,
+`settings_ack_timeouts`): nothing pending, the ack count advanced by the number of writes
+issued (`Unchanged` counts as an ack) and no ack timeout. If that fails the sweep ends with an
+error before the dome moves. The first drive is also retried for up to 12 s while the plugin
+rejects it because a settings write is in flight; acceptance only means no write is queued or
+waiting any more (an ack timeout clears it too), not that the firmware acked. Then the steps
 run. Each step commands its
 percent, settles, measures, then commands 0 and waits for standstill (telemetry
 `commanded_percent` 0 and |velocity| below `stall_deg_s`, or 5 s) before the next one, so
@@ -211,17 +221,22 @@ every step starts from rest. The bench node does its own stall detection, becaus
 firmware has no watchdog in continuous rotation: a stalled step is stopped at once and the
 sweep moves on. The speed sweep then binary-searches each direction between the highest
 stalled and the lowest moving percent to 2 % for `min_percent`. On completion, `~/abort`, an
-exception, SIGINT or SIGTERM the node commands 0, waits for standstill, restores the saved
-settings that differ, reads them back into `settings_after.json` and writes the results. A
-drive-service rejection, a heartbeat call failure, a controller taking the dome or more than
-1 s without telemetry aborts the sweep. A second SIGINT exits without waiting for the restore.
+exception, SIGINT or SIGTERM the node commands 0 (from then on it refuses to send any non-zero
+percent and the heartbeat only sends 0), waits for standstill, restores the saved settings
+that differ, waits for the firmware acks as above (status phase `restoring settings`), reads
+the settings back into `settings_after.json` and writes the results. If the restore is not
+confirmed it logs `settings restore NOT confirmed by firmware; check device.* and
+settings_before.json` at ERROR and records `settings_restored: false`. A drive-service
+rejection, a heartbeat call failure, a controller taking the dome or more than 1 s without
+telemetry aborts the sweep. A second SIGINT exits without waiting for the restore (it still
+sends 0).
 
 Output files in each run directory:
 
 | File | Contents |
 |------|----------|
 | `settings_before.json` | Saved settings, context (`inverted`, `home_pos`, ...), restore commands |
-| `settings_after.json` | Settings read back after the restore and whether they match |
+| `settings_after.json` | Settings read back after the restore, the restore writes issued, `ros_matches_before` (the ROS parameters equal the saved values), `firmware_acked` (true only if the firmware acked every restore write with no ack timeout; `null` if the plugin does not publish the counters, false otherwise) and `ack_timeouts_during_restore` |
 | `samples.csv` | One row per telemetry message during a step: `t_host,seq,position_deg,unwrapped_rad,velocity_rad_s,commanded_percent,direction,step_index,phase` (plan 5.5); `direction` is the sign of the commanded percent, `phase` is `settle` or `measure`. Written as it arrives |
 | `run.json` | Sweep type, status (`running`, `complete`, `aborted`, `error`) and reason, the analysis config, the step list, settings and counts |
 | `sensor_sweep.json` | Per step: samples, mean and standard deviation of velocity over the measure phase, jumps (with start angle, change, interval, percent), reversals, stalls; the 10 degree jump start histogram; totals and `suggested_pass` (no jumps and no reversals) |
@@ -284,6 +299,11 @@ serial port path as `hardware_id`:
 Values include the report and poll counters, the firmware's sensor and packet
 serial error counts, the last accepted `:DPR` percent, the last target and home
 reached, position timeouts, out-of-range rejections and the current command mode.
+`roamadome: motion` also reports the settings-write pipeline: `settings_writes_pending`
+(ack-tracked `#DP...` writes queued, plus one waiting for its ack), `settings_acks`
+(completed by `Write Settings` + `Updated` or by `Unchanged`) and `settings_ack_timeouts`
+(abandoned after the 3 s ack timeout; such a write may not have reached flash). The counters
+reset on activation; `on_deactivate` drops queued writes.
 
 The firmware's own counters come from `#DPSTATUS`, which the interface queues
 (followed by `#DPINVALID` to close the section) once on activation and then every
@@ -719,7 +739,9 @@ colcon test-result --verbose
 
 Current tests include serial parser behavior, command terminator behavior, and configure-state-machine startup coverage.
 `test/test_bench_analysis.py` (pytest) covers the bench analysis on synthetic telemetry
-streams without ROS, including the offline report tool.
+streams without ROS, including the offline report tool; `test/test_bench_control.py` covers
+the node's safety logic without a ROS graph (sweep claim, drive gate, parameter validation,
+settings-ack check).
 
 ## License
 

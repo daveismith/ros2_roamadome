@@ -41,12 +41,14 @@ import traceback
 from astromech_msgs.msg import DomeTelemetry
 from astromech_msgs.srv import DomeBenchDrive
 from diagnostic_msgs.msg import DiagnosticArray
+from rcl_interfaces.msg import SetParametersResult
 from rcl_interfaces.srv import GetParameters
 from rcl_interfaces.srv import SetParameters
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.logging import get_logger
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.parameter import parameter_value_to_python
@@ -57,6 +59,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from . import analysis
+from . import control
 
 # Settings the bench may change, saved to settings_before.json (plan 6, phase 5 step 1).
 SAVED_SETTINGS = ('max_speed', 'min_speed', 'speed_target', 'scaling')
@@ -68,12 +71,13 @@ RAW_MOTOR_SETTINGS = (('max_speed', 100), ('speed_target', 100), ('scaling', Fal
 
 TELEMETRY_TIMEOUT_S = 1.0      # dropout during a sweep aborts it
 STANDSTILL_TIMEOUT_S = 5.0     # plan: wait for standstill or 5 s
-SERVICE_TIMEOUT_S = 2.0        # any single service call
-DRIVE_LOCK_TIMEOUT_S = 3.0
+SERVICE_TIMEOUT_S = control.SERVICE_TIMEOUT_S  # any single service call
 SETTING_READBACK_TIMEOUT_S = 5.0
 SETTING_RETRY_S = 10.0         # retry a write the plugin refuses while the dome is stopping
 SETTINGS_IN_FLIGHT_RETRY_S = 12.0  # first drive after a settings write waits for its ack
 SETTINGS_SETTLE_S = 2.0        # let the post-ack #DPCONFIG refresh land before reading back
+SETTINGS_ACK_TIMEOUT_S = 10.0  # wait for the firmware to ack the settings writes
+DIAGNOSTICS_WAIT_S = 3.0       # wait for a first roamadome: motion status (1 Hz)
 LOOP_PERIOD_S = 0.05
 SPEED_ESTIMATE_S = 1.0         # tail of the settle phase used to size the measure window
 
@@ -118,21 +122,27 @@ class BenchNode(Node):
         self.declare_parameter('speed_sweep.stall_s', 2.0)
         self.declare_parameter('speed_sweep.raw_motor', True)
 
+        errors = control.validate_config(lambda name: self.get_parameter(name).value)
+        if errors:
+            raise ValueError('invalid roamadome_bench parameters:\n  ' + '\n  '.join(errors))
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+
         hw = str(self.get_parameter('hardware_node').value).strip().rstrip('/')
         self._hw = hw if hw.startswith('/') else '/' + hw
 
-        self._lock = threading.Lock()          # status, latest telemetry, worker handle
-        self._drive_lock = threading.Lock()    # serialises every bench/drive call
+        self._lock = threading.Lock()          # status, latest telemetry and diagnostics
+        self._claim = control.SweepClaim()     # one sweep at a time, claimed atomically
+        self._gate = control.DriveGate(self._call_drive)  # serialises bench/drive calls
         self._abort_event = threading.Event()
         self._force_event = threading.Event()  # second signal: stop waiting for cleanup
         self._abort_reason = None
-        self._worker = None
         self._sweep_active = False
-        self._current_percent = 0
         self._telemetry_queue = queue.Queue()
         self._latest_msg = None
         self._latest_rx = 0.0
         self._sensor_diag = None
+        self._motion_counters = None           # (pending, acks, timeouts) from /diagnostics
+        self._motion_stamp = 0.0               # header stamp of that diagnostics message
         self._status = {'state': 'idle'}
         self._last_result = None
 
@@ -181,8 +191,30 @@ class BenchNode(Node):
         if active:
             self._telemetry_queue.put(msg)
 
+    def _on_set_parameters(self, parameters):
+        result = SetParametersResult(successful=True)
+        proposed = {p.name: p.value for p in parameters}
+        for name in ('hardware_node', 'heartbeat_period_s'):
+            if name in proposed:
+                result.successful = False
+                result.reason = '%s is read at startup; restart the node to change it' % name
+                return result
+        errors = control.validate_config(
+            lambda name: proposed[name] if name in proposed else self.get_parameter(name).value)
+        if errors:
+            result.successful = False
+            result.reason = '; '.join(errors)
+        return result
+
     def _on_diagnostics(self, msg):
         for status in msg.status:
+            if status.name == 'roamadome: motion':
+                counters = control.parse_settings_counters(
+                    {kv.key: kv.value for kv in status.values})
+                if counters is not None:
+                    with self._lock:
+                        self._motion_counters = counters
+                        self._motion_stamp = _stamp_seconds(msg.header.stamp)
             if status.name == 'roamadome: sensor':
                 values = {kv.key: kv.value for kv in status.values}
                 values['level'] = int.from_bytes(status.level, 'little') \
@@ -192,56 +224,67 @@ class BenchNode(Node):
                     self._sensor_diag = values
 
     def _on_start(self, sweep, response):
-        with self._lock:
-            busy = self._worker is not None and self._worker.is_alive()
-            latest = self._latest_msg
-            age = time.monotonic() - self._latest_rx
         response.success = False
-        if busy:
+        # Claim the sweep slot atomically before any other check: the start
+        # services run in a reentrant group, so two calls can overlap.
+        if not self._claim.try_claim():
             response.message = 'a sweep is already running'
             return response
-        if latest is None or age > TELEMETRY_TIMEOUT_S:
-            response.message = 'no telemetry on %s/telemetry (is publish_telemetry on?)' % self._hw
-            return response
-        if latest.command_mode != DomeTelemetry.COMMAND_MODE_IDLE or latest.commanded_percent:
-            response.message = ('hardware is not idle (command_mode %d, commanded %d%%); a '
-                                'controller or another bench client holds the dome'
-                                % (latest.command_mode, latest.commanded_percent))
-            return response
-        for client, name in ((self._drive_client, 'bench/drive'),
-                             (self._get_client, 'get_parameters'),
-                             (self._set_client, 'set_parameters')):
-            if not client.service_is_ready():
-                response.message = '%s/%s is not available (bench mode off?)' % (self._hw, name)
-                return response
+        # Reset the abort state right after the claim, so an abort that arrives while
+        # the start is being prepared is kept and ends the sweep at its first check.
+        self._abort_event.clear()
+        self._abort_reason = None
+        self._gate.arm()
         try:
-            params = self._read_sweep_params(sweep)
-            run_dir = self._make_run_dir(params['output_dir'], sweep)
+            params, run_dir = self._prepare_start(sweep)
         except (ValueError, OSError) as exc:
+            self._claim.release()
             response.message = str(exc)
             return response
 
-        self._abort_event.clear()
-        self._abort_reason = None
         while not self._telemetry_queue.empty():
             self._telemetry_queue.get_nowait()
         worker = threading.Thread(target=self._sweep_main, args=(sweep, params, run_dir),
                                   name='roamadome_bench_%s' % sweep, daemon=True)
         with self._lock:
-            self._worker = worker
             self._sweep_active = True
             self._status = {'state': 'running', 'sweep': sweep, 'run_dir': run_dir,
                             'phase': 'starting', 'started_mono': time.monotonic()}
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            with self._lock:
+                self._sweep_active = False
+                self._status = {'state': 'idle'}
+            self._claim.release()
+            response.message = 'could not start the sweep thread: %s' % exc
+            return response
         response.success = True
         response.message = '%s sweep started; results in %s' % (sweep, run_dir)
         self.get_logger().info(response.message)
         return response
 
-    def _on_abort(self, request, response):
+    def _prepare_start(self, sweep):
+        """Pre-flight checks, parameters and run directory; raises ValueError to reject."""
         with self._lock:
-            running = self._worker is not None and self._worker.is_alive()
-        if not running:
+            latest = self._latest_msg
+            age = time.monotonic() - self._latest_rx
+        if latest is None or age > TELEMETRY_TIMEOUT_S:
+            raise ValueError('no telemetry on %s/telemetry (is publish_telemetry on?)' % self._hw)
+        if latest.command_mode != DomeTelemetry.COMMAND_MODE_IDLE or latest.commanded_percent:
+            raise ValueError('hardware is not idle (command_mode %d, commanded %d%%); a '
+                             'controller or another bench client holds the dome'
+                             % (latest.command_mode, latest.commanded_percent))
+        for client, name in ((self._drive_client, 'bench/drive'),
+                             (self._get_client, 'get_parameters'),
+                             (self._set_client, 'set_parameters')):
+            if not client.service_is_ready():
+                raise ValueError('%s/%s is not available (bench mode off?)' % (self._hw, name))
+        params = self._read_sweep_params(sweep)
+        return params, self._make_run_dir(params['output_dir'], sweep)
+
+    def _on_abort(self, request, response):
+        if not self._claim.held:
             response.success = False
             response.message = 'no sweep is running'
             return response
@@ -251,26 +294,13 @@ class BenchNode(Node):
         return response
 
     def _on_heartbeat(self):
-        # Keeps the plugin's bench heartbeat alive by re-sending the current percent.
+        # Keeps the plugin's bench heartbeat alive by re-sending the current percent;
+        # once stopping it sends 0 instead (DriveGate).
         if not self._sweep_active:
             return
-        if not self._drive_lock.acquire(blocking=False):
-            return  # the worker is sending right now, which refreshes the heartbeat
-        try:
-            if self._abort_event.is_set():
-                if self._current_percent != 0:
-                    self._current_percent = 0
-                    self._call_drive_locked(0)
-                return
-            percent = self._current_percent
-            if percent == 0:
-                return
-            ok, message = self._call_drive_locked(percent)
-            if not ok:
-                self._current_percent = 0
-                self.request_abort('heartbeat drive call failed: %s' % message)
-        finally:
-            self._drive_lock.release()
+        sent = self._gate.heartbeat()
+        if sent is not None and not sent[0] and not self._gate.stopping:
+            self.request_abort('heartbeat drive call failed: %s' % sent[1])
 
     def _publish_status(self):
         with self._lock:
@@ -298,11 +328,11 @@ class BenchNode(Node):
         if not self._abort_event.is_set():
             self._abort_reason = reason
             self.get_logger().warn('Abort requested: %s' % reason)
+        self._gate.begin_stopping()   # no non-zero percent from here on
         self._abort_event.set()
 
     def sweep_running(self):
-        with self._lock:
-            return self._worker is not None and self._worker.is_alive()
+        return self._claim.held
 
     def wait_for_worker(self):
         """Block until the worker has finished cleanup or a forced exit is requested."""
@@ -312,9 +342,8 @@ class BenchNode(Node):
     def force_exit(self):
         """Second signal: best-effort stop without waiting for the settings restore."""
         self._force_event.set()
-        self._current_percent = 0
         try:
-            self._call_drive_locked(0, timeout=0.5)
+            self._gate.force_stop(lock_timeout=0.5, timeout=0.5)
         except Exception:  # noqa: B902 - best effort on the way out
             pass
         self.get_logger().error(
@@ -335,7 +364,8 @@ class BenchNode(Node):
             return None
         return future.result()
 
-    def _call_drive_locked(self, percent, timeout=SERVICE_TIMEOUT_S):
+    def _call_drive(self, percent, timeout=SERVICE_TIMEOUT_S):
+        """One bench/drive call; only DriveGate calls this."""
         if not self._drive_client.service_is_ready():
             return False, '%s/bench/drive is not available' % self._hw
         request = DomeBenchDrive.Request()
@@ -347,16 +377,8 @@ class BenchNode(Node):
         return bool(response.success), response.message
 
     def _send_percent(self, percent):
-        if not self._drive_lock.acquire(timeout=DRIVE_LOCK_TIMEOUT_S):
-            return False, 'drive lock timeout'
-        try:
-            self._current_percent = int(percent)
-            ok, message = self._call_drive_locked(percent)
-            if not ok:
-                self._current_percent = 0
-            return ok, message
-        finally:
-            self._drive_lock.release()
+        """Command a percent; refused for non-zero once the sweep is stopping."""
+        return self._gate.send(percent)
 
     def _drive(self, percent, settings_retry_s=0.0):
         """Command a percent; a rejection aborts the sweep (plan: treat as abort)."""
@@ -421,6 +443,61 @@ class BenchNode(Node):
                 raise RuntimeError('device.%s reads back %r, expected %r' % (name, current, value))
             time.sleep(0.2)
 
+    def _settings_counters(self, wait_s=0.0):
+        """
+        Latest (pending, acks, timeouts) from the plugin's diagnostics, or None.
+
+        Only a status stamped within DIAGNOSTICS_WAIT_S counts, so counters left
+        over from a hardware node that has since gone away are not used.
+        """
+        deadline = time.monotonic() + wait_s
+        while True:
+            with self._lock:
+                fresh = time.time() - self._motion_stamp < DIAGNOSTICS_WAIT_S
+                counters = self._motion_counters if fresh else None
+            if counters is not None or time.monotonic() >= deadline:
+                return counters
+            time.sleep(0.1)
+
+    def _wait_settings_acked(self, baseline, writes, what, issued_wall):
+        """
+        Wait until the firmware acked ``writes`` settings writes issued after ``baseline``.
+
+        Uses the settings counters the plugin publishes on /diagnostics (roamadome:
+        motion). Returns ``(acked, timeouts)``: ``acked`` is True when nothing is
+        pending and the ack count advanced by ``writes`` with no ack timeout, False
+        on a timeout or after SETTINGS_ACK_TIMEOUT_S, None when the plugin does not
+        publish the counters. Only diagnostics stamped after ``issued_wall`` (wall
+        time once the last write was accepted) count, so a message built before the
+        writes were queued cannot report them as done.
+        """
+        if baseline is None:
+            self.get_logger().warn(
+                'No settings counters on /diagnostics (older plugin?); cannot confirm that '
+                'the firmware acked the %s' % what)
+            return None, None
+        deadline = time.monotonic() + SETTINGS_ACK_TIMEOUT_S
+        state, current = 'waiting', baseline
+        while time.monotonic() < deadline and not self._force_event.is_set():
+            with self._lock:
+                fresh = self._motion_stamp > issued_wall
+                if fresh:
+                    current = self._motion_counters
+            if fresh:
+                state = control.settings_ack_state(baseline, current, writes)
+                if state != 'waiting':
+                    break
+            time.sleep(0.1)
+        timeouts = current[2] - baseline[2]
+        if state == 'acked':
+            self.get_logger().info('Firmware acked the %s (%d write(s))' % (what, writes))
+            return True, timeouts
+        self.get_logger().error(
+            'Firmware did not ack the %s: %s (pending %d, acks +%d of %d, ack timeouts +%d)'
+            % (what, 'ack timed out' if state == 'timeout' else 'no ack within %.0f s'
+               % SETTINGS_ACK_TIMEOUT_S, current[0], current[1] - baseline[1], writes, timeouts))
+        return False, timeouts
+
     def _apply_settings(self, desired, interruptible):
         """Write each setting that differs (writes persist to flash: write once)."""
         names = [n for n, _ in desired]
@@ -441,11 +518,11 @@ class BenchNode(Node):
         def get(name):
             return self.get_parameter(name).value
 
+        errors = control.validate_config(get)
+        if errors:
+            raise ValueError('invalid parameters: ' + '; '.join(errors))
         prefix = 'sensor_sweep.' if sweep == 'sensor' else 'speed_sweep.'
-        percents = sorted({abs(int(p)) for p in (get(prefix + 'percents') or [])})
-        percents = [p for p in percents if 0 < p <= 100]
-        if not percents:
-            raise ValueError('%spercents has no value in 1..100' % prefix)
+        percents = [int(p) for p in get(prefix + 'percents')]
         params = {
             'output_dir': os.path.expanduser(str(get('output_dir'))),
             'percents': percents,
@@ -465,9 +542,6 @@ class BenchNode(Node):
             params['settle_s'] = float(get('speed_sweep.settle_s'))
             params['min_measure_s'] = float(get('speed_sweep.min_measure_s'))
             params['max_measure_s'] = float(get('speed_sweep.max_measure_s'))
-        for key in ('velocity_window_s', 'stall_deg_s', 'stall_s', 'max_plausible_deg_s'):
-            if not params[key] > 0.0:
-                raise ValueError('%s must be > 0' % key)
         return params
 
     def _make_run_dir(self, output_dir, sweep):
@@ -686,6 +760,7 @@ class BenchNode(Node):
             'settings_before': self._settings_before,
             'settings_written': self._settings_written,
             'settings_restored': self._settings_restored,
+            'raw_settings_firmware_acked': self._raw_settings_acked,
             'settings_after': self._settings_after,
             'sensor_diagnostics_before': self._diag_before,
             'sensor_diagnostics_after': self._diag_after,
@@ -717,6 +792,7 @@ class BenchNode(Node):
         self._settings_written = {}
         self._settings_restored = None
         self._settings_after = None
+        self._raw_settings_acked = None
         self._counts = {'samples': 0, 'jumps': 0, 'stalls': 0, 'steps_done': 0}
         with self._lock:
             self._diag_before = self._sensor_diag
@@ -738,7 +814,15 @@ class BenchNode(Node):
             self._write_run_json('running')
             self._check_abort()
             if params['raw_motor']:
+                baseline = self._settings_counters(DIAGNOSTICS_WAIT_S)
                 self._settings_written = self._apply_settings(RAW_MOTOR_SETTINGS, True)
+                issued = time.time()
+                self._set_status(phase='waiting for firmware settings ack')
+                acked, _ = self._wait_settings_acked(
+                    baseline, len(self._settings_written), 'raw_motor settings', issued)
+                self._raw_settings_acked = acked
+                if acked is False:
+                    raise RuntimeError('raw_motor settings not confirmed by the firmware')
             self._check_abort()
             if sweep == 'sensor':
                 self._run_sensor_sweep()
@@ -752,13 +836,20 @@ class BenchNode(Node):
             status, reason = 'error', '%s: %s' % (type(exc).__name__, exc)
             self.get_logger().error('Sweep failed: %s\n%s' % (reason, traceback.format_exc()))
         finally:
-            self._cleanup(status, reason)
+            try:
+                self._cleanup(status, reason)
+            finally:
+                self._claim.release()
 
     def _cleanup(self, status, reason):
         """Stop, wait for standstill, restore settings, write results. Never raises."""
+        # Arm the stop on every path (completion, abort, exception): from here on the
+        # gate refuses non-zero percents and the heartbeat only ever sends 0.
+        self._gate.begin_stopping()
         self._step = None
         self._set_status(state='stopping', phase='stopping')
         stopped = False
+        message = ''
         for _ in range(3):
             ok, message = self._send_percent(0)
             if ok:
@@ -767,28 +858,43 @@ class BenchNode(Node):
             self.get_logger().error('Stop call failed: %s' % message)
             time.sleep(0.2)
         if not stopped:
-            self.get_logger().error('Could not send percent 0; the plugin heartbeat stops the '
-                                    'dome within its timeout')
+            self.get_logger().error('Could not send percent 0 (%s): %s'
+                                    % (message, control.stop_failure_advice(message)))
         self._wait_standstill(strict=False)
         with self._lock:
             self._sweep_active = False
 
         if self._settings_before:
-            self._set_status(phase='restoring')
+            self._set_status(phase='restoring settings')
             desired = [(k, self._settings_before[k]) for k, _ in RAW_MOTOR_SETTINGS
                        if k in self._settings_before]
             try:
+                baseline = self._settings_counters(DIAGNOSTICS_WAIT_S)
                 restored = self._apply_settings(desired, interruptible=False)
-                self._settings_restored = True
+                issued = time.time()
                 if restored:
-                    self.get_logger().info('Restored settings: %s' % restored)
-                    time.sleep(SETTINGS_SETTLE_S)
+                    self.get_logger().info('Restore writes issued: %s' % restored)
+                acked, timeouts = self._wait_settings_acked(
+                    baseline, len(restored), 'settings restore', issued)
+                if restored:
+                    time.sleep(SETTINGS_SETTLE_S)  # post-ack #DPCONFIG refresh
                 self._settings_after = self._get_params(SAVED_SETTINGS)
+                ros_matches = all(_same_value(self._settings_after[k], v)
+                                  for k, v in self._settings_before.items())
+                self._settings_restored = ros_matches and acked is not False
                 analysis.write_json(os.path.join(self._run_dir, analysis.SETTINGS_AFTER_JSON), {
                     'hardware_node': self._hw, 'time': _now_iso(),
                     'settings': self._settings_after,
-                    'matches_before': all(_same_value(self._settings_after[k], v)
-                                          for k, v in self._settings_before.items())})
+                    'restore_writes': restored,
+                    'ros_matches_before': ros_matches,
+                    'firmware_acked': acked,
+                    'ack_timeouts_during_restore': timeouts})
+                if acked is False or not ros_matches:
+                    self.get_logger().error(
+                        'settings restore NOT confirmed by firmware; check device.* and %s'
+                        % os.path.join(self._run_dir, analysis.SETTINGS_BEFORE_JSON))
+                    if status == 'complete':
+                        status, reason = 'error', 'settings restore not confirmed'
             except Exception as exc:  # noqa: B902 - report and carry on writing results
                 self._settings_restored = False
                 self.get_logger().error(
@@ -821,7 +927,12 @@ class BenchNode(Node):
 
 def main(args=None):
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
-    node = BenchNode()
+    try:
+        node = BenchNode()
+    except ValueError as exc:
+        get_logger('roamadome_bench').fatal(str(exc))
+        rclpy.try_shutdown()
+        return 2
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     spin_thread = threading.Thread(target=executor.spin, name='executor', daemon=True)

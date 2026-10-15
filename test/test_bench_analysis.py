@@ -383,7 +383,7 @@ def speed_model(percent):
     return 0.027 * (p - 13) if p >= 21 else 0.0
 
 
-def speed_run():
+def speed_run(angle_sign=-1):
     rows, steps, t = [], [], T0
     entries = {1: [], -1: []}
 
@@ -399,7 +399,7 @@ def speed_run():
         else:
             deg_s = math.degrees(omega)
             measure = analysis.measure_duration(deg_s, 3.0, 30.0)
-            step = make_step(index, percent, deg_s, t, 50, 2.0, measure)
+            step = make_step(index, percent, deg_s, t, 50, 2.0, measure, angle_sign=angle_sign)
             reason = 'completed'
         rows.extend(step)
         steps.append({'index': index, 'kind': kind, 'percent': percent,
@@ -454,6 +454,31 @@ def test_speed_sweep_fit_min_percent_asymmetry_and_phase7():
     assert p7['max_speed_rad_per_sec'] == result['recommended_max_speed_rad_per_sec']
     assert result['totals']['jumps'] == 0
     assert result['totals']['stalled_steps'] >= 4
+
+
+def test_speed_sweep_mirror_when_positive_percent_raises_the_angle():
+    # Same dome with the opposite wiring/Inverted setting: everything mirrors.
+    run_info, rows = speed_run(angle_sign=1)
+    result = analysis.analyze_speed_sweep(run_info, rows)
+    assert result['angle_sign_for_positive_percent'] == 1
+    assert result['angle_sign_consistent']
+    pos = result['directions']['positive_percent']
+    neg = result['directions']['negative_percent']
+    assert pos['angle_sign'] == 1 and neg['angle_sign'] == -1
+    assert pos['wrong_direction_steps'] == [] and neg['wrong_direction_steps'] == []
+    assert all(s['velocity_rad_s'] > 0 for s in result['steps']
+               if s['moving'] and s['percent'] > 0)
+    p7 = result['phase7']
+    assert p7['positive_velocity']['percent_sign'] == 1
+    assert p7['negative_velocity']['percent_sign'] == -1
+    assert p7['positive_velocity']['k_percent_per_rad_s'] == pytest.approx(1 / 0.030, rel=0.02)
+    assert p7['positive_velocity']['p0_percent'] == pytest.approx(12.0, abs=1.0)
+    assert p7['positive_velocity']['min_percent'] == 18
+    assert p7['negative_velocity']['k_percent_per_rad_s'] == pytest.approx(1 / 0.027, rel=0.02)
+    assert p7['negative_velocity']['min_percent'] == neg['min_percent']
+    # magnitudes are independent of the sign convention
+    mirrored = analysis.analyze_speed_sweep(*speed_run(angle_sign=-1))
+    assert result['asymmetry_ratio'] == pytest.approx(mirrored['asymmetry_ratio'])
 
 
 def test_sensor_thresholds_from_speed_result():

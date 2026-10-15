@@ -152,6 +152,7 @@ if(BUILD_TESTING)
   # Bench analysis (pure Python, must not need rclpy)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_bench_analysis test/test_bench_analysis.py)
+  ament_add_pytest_test(test_bench_control test/test_bench_control.py)
 endif()
 
 ament_export_include_directories(

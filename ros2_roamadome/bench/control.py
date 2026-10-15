@@ -1,0 +1,246 @@
+# Copyright (c) 2026
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Control helpers for the roamadome_bench node, without ROS imports.
+
+The safety-relevant pieces of the node live here so they can be unit tested
+without a ROS graph: the atomic sweep claim, the drive gate that serialises
+bench drive calls and refuses a non-zero percent once a sweep is stopping,
+parameter validation, the firmware settings-ack check and the advice printed
+when a stop call fails.
+"""
+
+import threading
+
+HEARTBEAT_MAX_S = 1.0          # the plugin's bench watchdog defaults to 1.5 s
+DRIVE_LOCK_TIMEOUT_S = 3.0
+SERVICE_TIMEOUT_S = 2.0
+
+REFUSED_STOPPING = 'the sweep is stopping: non-zero percent refused'
+
+
+class SweepClaim:
+    """At most one sweep at a time: claimed atomically, released by its owner."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._held = False
+
+    def try_claim(self):
+        """Claim the sweep slot; return False if a sweep already holds it."""
+        with self._lock:
+            if self._held:
+                return False
+            self._held = True
+            return True
+
+    def release(self):
+        with self._lock:
+            self._held = False
+
+    @property
+    def held(self):
+        with self._lock:
+            return self._held
+
+
+class DriveGate:
+    """
+    Serialise every bench drive call and remember the percent to keep alive.
+
+    ``call(percent, timeout)`` performs one service call and returns
+    ``(ok, message)``. Once :meth:`begin_stopping` has been called (abort,
+    cleanup, signal) only percent 0 is sent until :meth:`arm` starts the next
+    sweep, so neither the worker nor the heartbeat can restart the dome.
+    """
+
+    def __init__(self, call):
+        self._call = call
+        self._lock = threading.Lock()
+        self._percent = 0
+        self._stopping = threading.Event()
+
+    def arm(self):
+        """Start of a sweep: nothing commanded, non-zero percents allowed."""
+        self._percent = 0
+        self._stopping.clear()
+
+    def begin_stopping(self):
+        """From now on refuse non-zero percents; the heartbeat sends 0 if needed."""
+        self._stopping.set()
+
+    @property
+    def stopping(self):
+        return self._stopping.is_set()
+
+    @property
+    def percent(self):
+        return self._percent
+
+    def send(self, percent, lock_timeout=DRIVE_LOCK_TIMEOUT_S, timeout=SERVICE_TIMEOUT_S):
+        """Command ``percent`` (worker). Returns ``(ok, message)``."""
+        percent = int(percent)
+        if percent != 0 and self._stopping.is_set():
+            return False, REFUSED_STOPPING
+        if not self._lock.acquire(timeout=lock_timeout):
+            return False, 'drive lock timeout'
+        try:
+            if percent != 0 and self._stopping.is_set():
+                return False, REFUSED_STOPPING
+            self._percent = percent
+            ok, message = self._call(percent, timeout)
+            if not ok:
+                self._percent = 0
+            return ok, message
+        finally:
+            self._lock.release()
+
+    def heartbeat(self, timeout=SERVICE_TIMEOUT_S):
+        """
+        Re-send the current percent (heartbeat timer).
+
+        Returns None when nothing was sent (the worker holds the lock, or the
+        dome is not commanded), else ``(ok, message)``. While stopping it sends
+        0 once if a non-zero percent is still recorded.
+        """
+        if not self._lock.acquire(blocking=False):
+            return None  # the worker is sending, which refreshes the plugin heartbeat
+        try:
+            if self._stopping.is_set():
+                if self._percent == 0:
+                    return None
+                self._percent = 0
+                return self._call(0, timeout)
+            if self._percent == 0:
+                return None
+            ok, message = self._call(self._percent, timeout)
+            if not ok:
+                self._percent = 0
+            return ok, message
+        finally:
+            self._lock.release()
+
+    def force_stop(self, lock_timeout=0.5, timeout=0.5):
+        """Last-resort 0 on exit: take the lock briefly if possible, send 0 regardless."""
+        self._stopping.set()
+        locked = self._lock.acquire(timeout=lock_timeout)
+        try:
+            self._percent = 0
+            return self._call(0, timeout)
+        finally:
+            if locked:
+                self._lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Parameter validation
+# ---------------------------------------------------------------------------
+
+def validate_percents(name, values):
+    """Errors for a percent list: integers in 1..100, strictly ascending, no duplicates."""
+    errors = []
+    values = list(values or [])
+    if not values:
+        return ['%s is empty' % name]
+    for v in values:
+        if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 100:
+            errors.append('%s: %r is not an integer in 1..100' % (name, v))
+    if len(set(values)) != len(values):
+        errors.append('%s has duplicates: %s' % (name, values))
+    elif any(b <= a for a, b in zip(values, values[1:])):
+        errors.append('%s must be ascending (lowest first): %s' % (name, values))
+    return errors
+
+
+def validate_config(get):
+    """
+    Return the list of errors in the bench parameters; ``get(name)`` reads a value.
+
+    Rejected: heartbeat_period_s outside (0, HEARTBEAT_MAX_S]; bad percent
+    lists; negative settle times; non-positive durations and thresholds;
+    min_measure_s greater than max_measure_s.
+    """
+    errors = []
+    heartbeat = get('heartbeat_period_s')
+    if not 0.0 < heartbeat <= HEARTBEAT_MAX_S:
+        errors.append('heartbeat_period_s must be in (0, %.1f] s (the plugin watchdog is '
+                      '1.5 s by default), got %r' % (HEARTBEAT_MAX_S, heartbeat))
+    errors += validate_percents('sensor_sweep.percents', get('sensor_sweep.percents'))
+    errors += validate_percents('speed_sweep.percents', get('speed_sweep.percents'))
+    for name in ('sensor_sweep.settle_s', 'speed_sweep.settle_s'):
+        if get(name) < 0.0:
+            errors.append('%s must be >= 0, got %r' % (name, get(name)))
+    for name in ('sensor_sweep.duration_s', 'speed_sweep.min_measure_s',
+                 'speed_sweep.max_measure_s', 'speed_sweep.stall_deg_s', 'speed_sweep.stall_s',
+                 'sensor_sweep.max_plausible_deg_s', 'velocity_window_s'):
+        if not get(name) > 0.0:
+            errors.append('%s must be > 0, got %r' % (name, get(name)))
+    if get('speed_sweep.min_measure_s') > get('speed_sweep.max_measure_s'):
+        errors.append('speed_sweep.min_measure_s (%r) must not exceed speed_sweep.max_measure_s '
+                      '(%r)' % (get('speed_sweep.min_measure_s'),
+                                get('speed_sweep.max_measure_s')))
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Firmware settings acknowledgement (plugin /diagnostics, roamadome: motion)
+# ---------------------------------------------------------------------------
+
+def parse_settings_counters(values):
+    """
+    Extract the settings-write counters from a ``roamadome: motion`` status.
+
+    ``values`` maps key to string. Returns ``(pending, acks, timeouts)`` or None
+    if the plugin does not publish them (an older plugin).
+    """
+    try:
+        return (int(values['settings_writes_pending']), int(values['settings_acks']),
+                int(values['settings_ack_timeouts']))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def settings_ack_state(baseline, current, writes):
+    """
+    Decide whether ``writes`` settings writes issued after ``baseline`` are acked.
+
+    ``baseline`` and ``current`` are ``(pending, acks, timeouts)``. Returns
+    ``'acked'`` when nothing is pending, the ack count advanced by at least
+    ``writes`` (``Unchanged`` counts as an ack) and no ack timed out;
+    ``'timeout'`` as soon as an ack timed out; otherwise ``'waiting'``.
+    """
+    _, base_acks, base_timeouts = baseline
+    pending, acks, timeouts = current
+    if timeouts != base_timeouts:
+        return 'timeout'
+    if pending == 0 and acks - base_acks >= writes:
+        return 'acked'
+    return 'waiting'
+
+
+# ---------------------------------------------------------------------------
+# Stop failures
+# ---------------------------------------------------------------------------
+
+def stop_failure_advice(message):
+    """Explain what a failed percent-0 call means for the dome, from the plugin's reason."""
+    if 'inactive' in message or 'controller is commanding' in message:
+        return ('the dome was already stopped by the plugin (it sends :DPR0 on deactivation '
+                'and when a controller takes over)')
+    if 'serial port is closed' in message:
+        return ('the plugin cannot reach the controller (serial port closed); check that the '
+                'dome has stopped')
+    return ('if the hardware node is alive its bench heartbeat stops the dome within '
+            'bench_heartbeat_timeout_ms; if it died, check that the dome has stopped')
