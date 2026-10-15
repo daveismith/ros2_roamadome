@@ -325,6 +325,27 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  if (!parseOptionalBoolParameter(
+      parameters, logger_, "enable_bench_mode", false, &enableBenchMode_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "bench_heartbeat_timeout_ms",
+      1500,
+      [](uint32_t value) {return value > 0;},
+      "> 0",
+      &benchHeartbeatTimeoutMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  RCLCPP_INFO(logger_, "Bench mode %s; bench heartbeat timeout: %u ms",
+              enableBenchMode_ ? "ENABLED (raw ~/bench/drive service)" : "disabled",
+              benchHeartbeatTimeoutMs_);
   RCLCPP_INFO(logger_, "Maximum speed configured: %.4f rad/s (%.2f°/s)",
               maxSpeedRadPerSec_, radiansToDegrees(maxSpeedRadPerSec_));
   RCLCPP_INFO(logger_, "Velocity estimate window: %.3f s; telemetry publishing %s",
@@ -1099,6 +1120,17 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
       });
   }
 
+  if (enableBenchMode_ && !benchDriveService_) {
+    benchDriveService_ = node->create_service<astromech_msgs::srv::DomeBenchDrive>(
+      "~/bench/drive",
+      [this](const std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Request> request,
+      std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Response> response) {
+        handleBenchDrive(request, response);
+      });
+    RCLCPP_WARN(logger_, "Bench mode enabled: %s raw drive service is available",
+      benchDriveService_->get_service_name());
+  }
+
   if (!periodicConfigTimer_) {
     periodicConfigTimer_ = node->create_wall_timer(
       std::chrono::milliseconds(configRefreshIntervalMs_),
@@ -1173,6 +1205,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
 
   setupService_.reset();
   setHomeService_.reset();
+  benchDriveService_.reset();
   // Keep the callback registered across deactivate so device.* writes continue
   // to be validated/rejected deterministically while hardware is inactive.
 
@@ -1212,7 +1245,13 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
     // turning when the interface goes inactive.
     sendStopCommand();
     currentMode_ = CommandMode::IDLE;
-    telemetryCommandMode_.store(telemetryCommandModeValue(CommandMode::IDLE));
+    {
+      std::lock_guard<std::mutex> lock(bench_mutex_);
+      benchActive_ = false;
+      benchPendingPercent_ = 0;
+      benchLastSentPercent_ = 0;
+      updateTelemetryModeLocked();
+    }
     serialHandler_->sendCommand("#DPREPORT0");
     nanosleep(&ts, NULL);
     serialHandler_->close();
@@ -1354,7 +1393,10 @@ hardware_interface::return_type RoamadomeControl::write(
       }
     }
   }
-  // IDLE mode: don't send any commands
+  // IDLE mode: no controller commands; only the bench drive may act.
+  if (enableBenchMode_) {
+    serviceBenchDrive();
+  }
 
   return return_type::OK;
 }
@@ -1408,14 +1450,22 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
     }
   }
 
+  // A bench drive must never run under a controller: stop it first.
+  if (new_mode != CommandMode::IDLE) {
+    stopBenchDrive("controller started");
+  }
+
   // If switching away from an active mode, send stop command
   if (currentMode_ != CommandMode::IDLE && new_mode != currentMode_) {
     RCLCPP_INFO(logger_, "Mode switch detected, sending stop command");
     sendStopCommand();
   }
 
-  currentMode_ = new_mode;
-  telemetryCommandMode_.store(telemetryCommandModeValue(new_mode));
+  {
+    std::lock_guard<std::mutex> lock(bench_mutex_);
+    currentMode_ = new_mode;
+    updateTelemetryModeLocked();
+  }
 
   RCLCPP_INFO(logger_, "Command mode switched to: %s",
               currentMode_ == CommandMode::POSITION ? "POSITION" :
@@ -1488,6 +1538,108 @@ bool RoamadomeControl::sendVelocityCommand(int32_t percentage)
   }
   recordCommandedPercent(percentage);
   return true;
+}
+
+void RoamadomeControl::updateTelemetryModeLocked()
+{
+  telemetryCommandMode_.store(
+    benchActive_ ? astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_BENCH :
+    telemetryCommandModeValue(currentMode_));
+}
+
+void RoamadomeControl::handleBenchDrive(
+  const std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Request> request,
+  std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Response> response)
+{
+  // Executor thread. Records the request only; write() does the serial I/O.
+  response->success = false;
+  if (!lifecycleActive_.load()) {
+    response->message = "hardware interface is inactive; bench drive rejected";
+    return;
+  }
+  if (!serialHandler_ || !serialHandler_->isOpen()) {
+    response->message = "serial port is closed; bench drive rejected";
+    return;
+  }
+  const int32_t percent = std::clamp<int32_t>(request->percent, -100, 100);
+  {
+    std::lock_guard<std::mutex> lock(bench_mutex_);
+    if (currentMode_ != CommandMode::IDLE) {
+      response->message = "a controller is commanding the dome (mode is not IDLE); "
+        "bench drive rejected";
+      return;
+    }
+    if (!benchActive_ && percent == 0 && benchLastSentPercent_ == 0) {
+      response->success = true;
+      response->message = "bench drive already stopped";
+      return;
+    }
+    benchActive_ = true;
+    benchPendingPercent_ = percent;
+    benchLastCallTime_ = std::chrono::steady_clock::now();
+    updateTelemetryModeLocked();
+  }
+  response->success = true;
+  response->message = "bench drive " + std::to_string(percent) + "% accepted; call again within " +
+    std::to_string(benchHeartbeatTimeoutMs_) + " ms to keep the dome turning";
+}
+
+void RoamadomeControl::stopBenchDrive(const char * reason)
+{
+  // Controller manager thread. Sends :DPR0 if a non-zero percent was sent, then
+  // clears all bench state.
+  bool need_stop = false;
+  {
+    std::lock_guard<std::mutex> lock(bench_mutex_);
+    need_stop = benchActive_ && benchLastSentPercent_ != 0;
+  }
+  if (need_stop) {
+    RCLCPP_WARN(logger_, "Bench drive stopped (%s); sending :DPR0", reason);
+    sendStopCommand();
+  }
+  std::lock_guard<std::mutex> lock(bench_mutex_);
+  benchActive_ = false;
+  benchPendingPercent_ = 0;
+  benchLastSentPercent_ = 0;
+  updateTelemetryModeLocked();
+}
+
+void RoamadomeControl::serviceBenchDrive()
+{
+  enum class Action {NONE, SEND, EXPIRE, CONTROLLER};
+  Action action = Action::NONE;
+  int32_t percent = 0;
+  {
+    std::lock_guard<std::mutex> lock(bench_mutex_);
+    if (!benchActive_) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (currentMode_ != CommandMode::IDLE) {
+      action = Action::CONTROLLER;
+    } else if (now - benchLastCallTime_ > std::chrono::milliseconds(benchHeartbeatTimeoutMs_)) {
+      action = Action::EXPIRE;
+    } else if (benchPendingPercent_ != benchLastSentPercent_) {
+      action = Action::SEND;
+      percent = benchPendingPercent_;
+    }
+  }
+
+  if (action == Action::CONTROLLER) {
+    stopBenchDrive("a controller took over");
+  } else if (action == Action::EXPIRE) {
+    stopBenchDrive("heartbeat expired");
+  } else if (action == Action::SEND) {
+    const bool sent = percent == 0 ? sendStopCommand() : sendVelocityCommand(percent);
+    if (sent) {
+      std::lock_guard<std::mutex> lock(bench_mutex_);
+      benchLastSentPercent_ = percent;
+      if (percent == 0 && benchPendingPercent_ == 0) {
+        benchActive_ = false;  // explicitly stopped
+        updateTelemetryModeLocked();
+      }
+    }
+  }
 }
 
 bool RoamadomeControl::sendStopCommand()

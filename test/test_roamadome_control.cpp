@@ -112,6 +112,27 @@ protected:
 
   bool sendStopCommandForTest() {return controller_->sendStopCommand();}
 
+  // Bench mode accessors.
+  astromech_msgs::srv::DomeBenchDrive::Response benchDriveForTest(int percent)
+  {
+    auto request = std::make_shared<astromech_msgs::srv::DomeBenchDrive::Request>();
+    request->percent = static_cast<int8_t>(percent);
+    auto response = std::make_shared<astromech_msgs::srv::DomeBenchDrive::Response>();
+    controller_->handleBenchDrive(request, response);
+    return *response;
+  }
+  bool benchServiceIsNullForTest() const {return controller_->benchDriveService_ == nullptr;}
+  void setVelocityModeForTest()
+  {
+    controller_->currentMode_ = RoamadomeControl::CommandMode::VELOCITY;
+  }
+  hardware_interface::return_type switchToVelocityForTest()
+  {
+    return controller_->perform_command_mode_switch({"dome_joint/velocity"}, {});
+  }
+  uint8_t telemetryModeForTest() const {return controller_->telemetryCommandMode_.load();}
+  int8_t commandedPercentForTest() const {return controller_->lastCommandedPercent_.load();}
+
   bool sendQueueCommandActiveForTest() const
   {
     std::lock_guard<std::mutex> lock(controller_->sendQueue_mutex_);
@@ -1823,7 +1844,7 @@ private:
       if (line.rfind("DP", 0) == 0) {
         line = "#" + line;  // PTY can drop the leading '#'
       }
-      if (!line.empty() && '#' == line.front()) {
+      if (!line.empty() && ('#' == line.front() || ':' == line.front())) {
         std::lock_guard<std::mutex> lock(mutex_);
         seen_.push_back(line);
       }
@@ -2284,6 +2305,177 @@ TEST_F(RoamadomeControlTest, FirmwareLines_UpdateDiagnosticsState)
   // Position reports are counted for the link status.
   feed("DOME POSITION: 12\n");
   EXPECT_EQ(diagnosticsStateForTest().position_reports, 1u);
+}
+
+// ---- Bench mode (docs/dome_diagnostics_plan.md, phase 4) ----
+
+namespace
+{
+constexpr int kBenchTimeoutMs = 100;
+}
+
+class BenchModeTest : public RoamadomeControlTest
+{
+protected:
+  // Brings the controller up on a pty with bench mode on (or off).
+  void bringUp(PseudoTerminal * pty, bool enable_bench)
+  {
+    hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+    info.hardware_parameters["serial_port"] = pty->slavePath();
+    info.hardware_parameters["startup_default_timeout_ms"] = "200";
+    info.hardware_parameters["startup_report_timeout_ms"] = "200";
+    info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+    info.hardware_parameters["startup_retries"] = "1";
+    info.hardware_parameters["enable_bench_mode"] = enable_bench ? "true" : "false";
+    info.hardware_parameters["bench_heartbeat_timeout_ms"] = std::to_string(kBenchTimeoutMs);
+
+    hardware_interface::HardwareComponentInterfaceParams params;
+    params.hardware_info = info;
+    ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+  }
+
+  void configureAndActivate()
+  {
+    rclcpp_lifecycle::State previous_state(
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+    ASSERT_EQ(
+      controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+    setLifecycleActiveForTest(true);
+  }
+
+  void writeOnce()
+  {
+    const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+    ASSERT_EQ(
+      controller_->write(now, rclcpp::Duration::from_seconds(0.02)),
+      hardware_interface::return_type::OK);
+  }
+};
+
+TEST_F(BenchModeTest, BenchDrive_SendsOnceThenStopsOnHeartbeatTimeout)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  const auto first = benchDriveForTest(20);
+  EXPECT_TRUE(first.success) << first.message;
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_BENCH);
+  // The handler must not touch the serial port.
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(firmware.count(":DPR20"), 0);
+
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR20", 1000));
+  EXPECT_EQ(commandedPercentForTest(), 20);
+
+  // A second identical call (heartbeat) produces nothing new on the wire.
+  EXPECT_TRUE(benchDriveForTest(20).success);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPR20"), 1);
+  EXPECT_EQ(firmware.count(":DPR0"), 0);
+
+  // Silence past the timeout stops the dome.
+  std::this_thread::sleep_for(std::chrono::milliseconds(kBenchTimeoutMs + 50));
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+  EXPECT_EQ(commandedPercentForTest(), 0);
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_IDLE);
+
+  // The stop is sent once, not on every write.
+  writeOnce();
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPR0"), 1);
+}
+
+TEST_F(BenchModeTest, BenchDrive_ClampsAndExplicitZeroStops)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_TRUE(benchDriveForTest(127).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR100", 1000));
+
+  EXPECT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_IDLE);
+}
+
+TEST_F(BenchModeTest, BenchDrive_RejectedWhileControllerActiveOrUnavailable)
+{
+  // Inactive and port closed.
+  auto response = benchDriveForTest(20);
+  EXPECT_FALSE(response.success);
+  EXPECT_NE(response.message.find("inactive"), std::string::npos);
+
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  setVelocityModeForTest();
+  response = benchDriveForTest(20);
+  EXPECT_FALSE(response.success);
+  EXPECT_NE(response.message.find("not IDLE"), std::string::npos);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPR20"), 0);
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_IDLE);
+}
+
+TEST_F(BenchModeTest, ModeSwitchToVelocity_StopsActiveBenchDrive)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_TRUE(benchDriveForTest(20).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR20", 1000));
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+  EXPECT_EQ(commandedPercentForTest(), 0);
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_VELOCITY);
+
+  // Bench state is cleared: no further bench traffic, even after the timeout.
+  std::this_thread::sleep_for(std::chrono::milliseconds(kBenchTimeoutMs + 50));
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPR0"), 1);
+}
+
+TEST_F(BenchModeTest, BenchDisabled_NoServiceIsCreated)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false);
+  EXPECT_TRUE(benchServiceIsNullForTest());
+}
+
+TEST_F(BenchModeTest, ParameterParsing_ZeroHeartbeatTimeout_Fails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["bench_heartbeat_timeout_ms"] = "0";
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
 }
 
 }  // namespace ros2_roamadome
