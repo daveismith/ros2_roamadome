@@ -36,6 +36,12 @@ ros2_roamadome/
 ├── src/
 │   ├── roamadome_control.cpp      # Hardware interface implementation
 │   └── roamadome_control_node.cpp # Standalone node (if applicable)
+├── ros2_roamadome/bench/
+│   ├── analysis.py                # Bench analysis, pure Python (no ROS imports)
+│   └── node.py                    # roamadome_bench node
+├── scripts/
+│   ├── roamadome_bench            # ros2 run entry point for the node
+│   └── roamadome_bench_report     # Offline analysis of a run directory
 ├── include/ros2_roamadome/
 │   ├── roamadome_control.hpp      # Hardware interface header
 │   └── visibility_control.h       # Symbol visibility macros
@@ -98,8 +104,9 @@ The topic is intended for the bench diagnostics described in
 [docs/dome_diagnostics_plan.md](docs/dome_diagnostics_plan.md) and is off by default.
 Because the serial port is polled from `read()`, the stamp resolution is one
 controller manager cycle (33 ms at 30 Hz) and two report lines that arrive in
-the same cycle share a stamp; the regression velocity tolerates this, but a
-per-sample timing analysis should not assume evenly spaced samples.
+the same cycle get stamps only microseconds apart; the regression velocity
+tolerates this, but a per-sample timing analysis should not assume evenly
+spaced samples.
 
 ### Bench mode
 
@@ -128,6 +135,139 @@ Safety: the firmware has no watchdog in continuous rotation. The heartbeat only 
 while this process is alive. If the process is killed (SIGKILL, crash, power loss to the
 host) the dome keeps turning at the last `:DPR` value; only a normal `on_deactivate` (which
 sends `:DPR0`) or a manual stop will halt it. Keep a human at the robot and the dome clear.
+
+### Bench node
+
+`roamadome_bench` (Python, `ros2_roamadome/bench/`) runs the two bench diagnostics of
+[docs/dome_diagnostics_plan.md](docs/dome_diagnostics_plan.md) through a bench-enabled
+hardware node: a **sensor sweep** that spins the dome at several percentages in both
+directions and scores every position report for jumps, reversals and stalls (plan 7.2), and a
+**speed sweep** that measures steady-state velocity per percentage, finds the minimum moving
+percentage and fits `omega = k * (p - p0)` per direction (plan 7.3).
+
+Launch it with the robot (`dome_bench:=true` also skips `dome_controller` and the dome teleop):
+
+```bash
+ros2 launch r2_bringup launch_robot.launch.py dome_bench:=true
+```
+
+or on its own against any hardware node that has `enable_bench_mode` and `publish_telemetry`
+set and no controller claiming the dome:
+
+```bash
+ros2 run ros2_roamadome roamadome_bench --ros-args -p output_dir:=~/dome_bench
+ros2 service call /roamadome_bench/start_sensor_sweep std_srvs/srv/Trigger
+ros2 topic echo /roamadome_bench/status
+ros2 service call /roamadome_bench/abort std_srvs/srv/Trigger
+```
+
+The node finds the hardware node by name through the `hardware_node` parameter (default
+`roamadome`, the lower-cased `ros2_control` block name), not by sharing its namespace as plan
+5.4 suggests: the hardware node's name comes from the URDF, so a parameter is simpler than
+pushing the bench node into a matching namespace. It uses `<hardware_node>/telemetry`,
+`<hardware_node>/bench/drive` and `<hardware_node>/{get,set}_parameters`.
+
+Parameters (read when a sweep starts, except `hardware_node` and `heartbeat_period_s`, which
+are read at startup):
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `hardware_node` | `roamadome` | Hardware node name (a leading `/` is added if missing) |
+| `output_dir` | `~/dome_bench` | One subdirectory per run, named `<YYYYmmdd-HHMMSS>-<sweep>` |
+| `heartbeat_period_s` | `0.5` | Re-send the current percent this often (the plugin stops after `bench_heartbeat_timeout_ms`, 1.5 s by default) |
+| `velocity_window_s` | `0.5` | Regression window for the per-sample velocity in the analysis (same rule as the plugin) |
+| `sensor_sweep.percents` | `[20, 35, 50, 75, 100]` | Run lowest first, each `+p` then `-p` |
+| `sensor_sweep.settle_s` | `2.0` | Settle before the measure phase (addition to plan 5.4) |
+| `sensor_sweep.duration_s` | `30.0` | Measure phase per percent per direction |
+| `sensor_sweep.max_plausible_deg_s` | `720.0` | Jump threshold; replaced by 1.5 x the measured maximum of a completed speed sweep in `output_dir` that used the same `raw_motor` and moved at or above the sensor sweep's highest percent |
+| `speed_sweep.percents` | `[10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100]` | Ascending, each `+p` then `-p` |
+| `speed_sweep.settle_s` | `2.0` | Wait after each command before measuring |
+| `speed_sweep.min_measure_s` | `4.0` | Measure for max(this, one revolution at the observed speed) ... |
+| `speed_sweep.max_measure_s` | `30.0` | ... capped here (addition to plan 5.4, which fixes 30 s) |
+| `speed_sweep.stall_deg_s` | `3.0` | Stalled when the average speed over the last `stall_s` is below this; used by both sweeps |
+| `speed_sweep.stall_s` | `2.0` | |
+| `speed_sweep.raw_motor` | `true` | For both sweeps, temporarily set `device.max_speed` 100, `device.speed_target` 100, `device.scaling` false |
+
+Services and topics on the bench node:
+
+| Name | Type | Notes |
+|------|------|-------|
+| `~/start_sensor_sweep` | `std_srvs/Trigger` | Rejected if a sweep runs, telemetry is not flowing, the hardware is not idle (`command_mode` 0, `commanded_percent` 0) or a hardware service is missing |
+| `~/start_speed_sweep` | `std_srvs/Trigger` | Same checks |
+| `~/abort` | `std_srvs/Trigger` | Returns at once; the worker stops the dome, restores settings and writes partial results |
+| `~/status` | `std_msgs/String` | JSON at 2 Hz: state, sweep, run directory, phase, step, percent, direction, elapsed, counts so far, last result |
+
+Every sweep follows the same lifecycle: save `device.max_speed`, `min_speed`, `speed_target`
+and `scaling` to `settings_before.json` (with the `ros2 param set` commands that restore them);
+with `raw_motor`, write the raw settings at standstill and read each back (a value already set
+is not written again, since every write goes to flash). The plugin accepts a parameter write
+before the firmware acks it, so the read-back only confirms the request; the first drive of
+the sweep is then retried for up to 12 s while the plugin rejects it because a settings write
+is still in flight, which is the bench node's sign that the firmware acked. Then the steps
+run. Each step commands its
+percent, settles, measures, then commands 0 and waits for standstill (telemetry
+`commanded_percent` 0 and |velocity| below `stall_deg_s`, or 5 s) before the next one, so
+every step starts from rest. The bench node does its own stall detection, because the
+firmware has no watchdog in continuous rotation: a stalled step is stopped at once and the
+sweep moves on. The speed sweep then binary-searches each direction between the highest
+stalled and the lowest moving percent to 2 % for `min_percent`. On completion, `~/abort`, an
+exception, SIGINT or SIGTERM the node commands 0, waits for standstill, restores the saved
+settings that differ, reads them back into `settings_after.json` and writes the results. A
+drive-service rejection, a heartbeat call failure, a controller taking the dome or more than
+1 s without telemetry aborts the sweep. A second SIGINT exits without waiting for the restore.
+
+Output files in each run directory:
+
+| File | Contents |
+|------|----------|
+| `settings_before.json` | Saved settings, context (`inverted`, `home_pos`, ...), restore commands |
+| `settings_after.json` | Settings read back after the restore and whether they match |
+| `samples.csv` | One row per telemetry message during a step: `t_host,seq,position_deg,unwrapped_rad,velocity_rad_s,commanded_percent,direction,step_index,phase` (plan 5.5); `direction` is the sign of the commanded percent, `phase` is `settle` or `measure`. Written as it arrives |
+| `run.json` | Sweep type, status (`running`, `complete`, `aborted`, `error`) and reason, the analysis config, the step list, settings and counts |
+| `sensor_sweep.json` | Per step: samples, mean and standard deviation of velocity over the measure phase, jumps (with start angle, change, interval, percent), reversals, stalls; the 10 degree jump start histogram; totals and `suggested_pass` (no jumps and no reversals) |
+| `speed_sweep.json` | Per step table; per direction (`positive_percent`, `negative_percent`): fit `k`, `p0`, R squared, `omega_max_rad_s` at 100 %, `min_percent`, velocity at `min_percent`; asymmetry ratio; recommended `max_speed_rad_per_sec` (the lower of the two maxima); the phase 7 `velocity_map` parameters keyed by velocity sign |
+
+Notes on the analysis (`ros2_roamadome/bench/analysis.py`, no ROS imports):
+
+- The direction of angle change for a positive percent is measured, not assumed
+  (`angle_sign_for_positive_percent`); on the bench robot a positive percent moves the reported
+  angle negative. Reversals are scored against this measured sign, and the phase 7 parameters
+  give the `percent_sign` that produces a positive (angle-increasing) velocity.
+- Two report lines read in the same controller cycle are stamped only tens of microseconds
+  apart (about 7 % of pairs on the bench robot), although the firmware sent them 28 ms apart;
+  scored with that interval every normal move would look like a jump. Pairs closer than 5 ms
+  (`same_cycle_dt_s` in the config) are therefore not scored for jumps; their count is
+  reported as `same_cycle_pairs`, and the largest gap between reports (the ~230 ms periodic
+  config refresh) as `max_gap_s`.
+- Reversals and stalls count only at percentages at or above the known minimum: the speed
+  sweep's `min_percent` when its result is used, otherwise the firmware `MinSpeed`.
+- Velocity per step is the least-squares slope over the measure phase; the mean and standard
+  deviation are of the windowed per-sample estimates. The fit uses the slope.
+
+Re-run the analysis offline (plain Python, no ROS needed beyond the installed package):
+
+```bash
+ros2 run ros2_roamadome roamadome_bench_report ~/dome_bench/20261014-210000-speed
+ros2 run ros2_roamadome roamadome_bench_report RUN_DIR --check          # exit 1 if it differs from the saved JSON
+ros2 run ros2_roamadome roamadome_bench_report RUN_DIR --set max_plausible_deg_s=400
+```
+
+**If the bench node is killed with SIGKILL** (or crashes) during a sweep, the dome stops
+through the plugin's heartbeat: no drive call arrives, so the hardware interface logs
+`Bench drive stopped (heartbeat expired); sent :DPR0` within `bench_heartbeat_timeout_ms`.
+The settings are **not** restored. Restore them by hand from the run's `settings_before.json`
+(it lists the commands), for example:
+
+```bash
+ros2 param set /roamadome device.max_speed 80
+ros2 param set /roamadome device.speed_target 100
+ros2 param set /roamadome device.scaling false
+ros2 param get /roamadome device.max_speed
+```
+
+The same applies when the whole launch is stopped with Ctrl-C during a sweep: the controller
+manager deactivates the hardware (which sends `:DPR0`) at the same time, so the bench node
+cannot write settings any more. Abort the sweep first and wait for `~/status` to report `idle`.
 
 ### Diagnostics
 
@@ -578,6 +718,8 @@ colcon test-result --verbose
 ```
 
 Current tests include serial parser behavior, command terminator behavior, and configure-state-machine startup coverage.
+`test/test_bench_analysis.py` (pytest) covers the bench analysis on synthetic telemetry
+streams without ROS, including the offline report tool.
 
 ## License
 

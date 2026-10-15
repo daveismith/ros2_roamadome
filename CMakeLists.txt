@@ -8,6 +8,7 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_ros REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -68,6 +69,15 @@ target_include_directories(roamadome_control_node PUBLIC
 target_link_libraries(roamadome_control_node ros2_roamadome)
 
 install(TARGETS roamadome_control_node
+  DESTINATION lib/${PROJECT_NAME})
+
+# Bench diagnostics (docs/dome_diagnostics_plan.md, phase 5): the Python package
+# ros2_roamadome.bench (analysis without ROS, the roamadome_bench node) and its
+# executables, so `ros2 run ros2_roamadome roamadome_bench` works.
+ament_python_install_package(${PROJECT_NAME})
+install(PROGRAMS
+  scripts/roamadome_bench
+  scripts/roamadome_bench_report
   DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
@@ -138,6 +148,10 @@ if(BUILD_TESTING)
     $<INSTALL_INTERFACE:include>
   )
   target_link_libraries(test_device_parameter_registry_parse ros2_roamadome)
+
+  # Bench analysis (pure Python, must not need rclpy)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_bench_analysis test/test_bench_analysis.py)
 endif()
 
 ament_export_include_directories(
