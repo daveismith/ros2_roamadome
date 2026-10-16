@@ -127,3 +127,38 @@ be reflashed. Both live in the Reeltwo library (`reeltwo/Reeltwo`,
 `src/drive/`), pulled unpinned by `DomeControlFirmware/platformio.ini`. The
 ROS plugin's `PositionTracker` can apply the same rule to the reported
 angle to protect `unwrapped_rad` and position control.
+
+## Addendum: the faults map to three spots on the shared track
+
+The ring is one track read by nine sensors spaced 40 degrees apart. The decode
+table proves it: bit `i` of the code at angle `A` equals the track value at
+`A - 40 i` for all 360 angles, and the track has 40 edges (20 marks), the 20
+paths of `Patterns/DomeSensorCompact.svg` in `reeltwo/DomeSensorFirmware32`.
+
+Converting every spurious raw reading to its track position (`A - 40 i`):
+
+| Track position | Sensor 0 spurious "B" | Sensor 1 spurious "B" | Sensors 2-8 |
+|---|---|---|---|
+| 198-201 | 18 | 5 | none |
+| 234-237 | 6 | 9 | none |
+| 252 | 6 | 5 | none |
+
+Sensor 1 sees each spot 40 degrees of dome rotation after sensor 0 (dome
+angles 241, 277, 292 against 198-201, 236, 253). The defect is on the ring at
+those three positions; sensors 0 and 1 are the two with the least margin,
+since the other seven read the same spots cleanly. The spots are 4-10 degrees
+from the nearest track edge (edges at 194, 227, 259), so a pattern edge parked
+over a sensor is not the cause; the sensors sitting on edges at those angles
+(6 and 7 at 198, 1 and 3 at 252) did not flicker.
+
+Pins: the ring firmware uses `SENSORS[]` from Reeltwo's `DomeSensorRing.h`;
+for the ESP32 build without `PIN_NEOPIXEL` that is `{18, 19, 21, 22, 32, 33,
+25, 26, 27}`, so bit 0 is GPIO 18 and bit 1 is GPIO 19 (the firmware's
+self-test prints them 1-based as sensors 1 and 2). The inputs are pulled up; a
+reflective sensor pulls its line low on reflection, so a raw 1 ("B") means too
+little reflection.
+
+To inspect: park at 198 and at 252, the spots are under sensor 0 (GPIO 18);
+at 238 and 292 they are under sensor 1 (GPIO 19). Compare gap and track
+surface there with a clean angle such as 207, and the gap at sensors 0 and 1
+with the other seven.
