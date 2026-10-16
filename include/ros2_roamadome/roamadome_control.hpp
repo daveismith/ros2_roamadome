@@ -3,6 +3,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "astromech_msgs/srv/dome_bench_drive.hpp"
 #include "astromech_msgs/msg/dome_telemetry.hpp"
 #include "diagnostic_msgs/msg/diagnostic_array.hpp"
 
@@ -188,6 +189,15 @@ private:
   bool sendVelocityCommand(int32_t percentage);
   bool sendStopCommand();
 
+  // Bench mode (docs/dome_diagnostics_plan.md, phase 4)
+  void handleBenchDrive(
+    const std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Request> request,
+    std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Response> response);
+  void serviceBenchDrive();
+  bool stopBenchDrive(const char * reason);  // false if :DPR0 could not be sent; state kept
+  void resetBenchState();
+  void updateTelemetryModeLocked();  // requires bench_mutex_
+
   // Telemetry and velocity estimation
   void handlePositionReport(uint32_t degrees, double radians);
 
@@ -218,7 +228,9 @@ private:
   double cmd_velocity_;
 
   // Command mode state tracking
-  CommandMode currentMode_ = CommandMode::IDLE;
+  // Atomic: written by the controller manager thread (mode switch), read by the
+  // bench drive service callback on the executor thread.
+  std::atomic<CommandMode> currentMode_{CommandMode::IDLE};
   double lastSentPosition_ = -1.0;  // Track last sent position to avoid redundant commands
   double lastSentVelocity_ = 0.0;   // Track last sent velocity to avoid redundant commands
   double maxSpeedRadPerSec_ = 3.14;  // Default: ~180°/s (configurable via parameter)
@@ -299,6 +311,19 @@ private:
   // Setup service
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr setupService_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr setHomeService_;
+
+  // Bench mode. The service callback (executor thread) only records the request
+  // under bench_mutex_; write() (controller manager thread) does all serial I/O
+  // and never holds bench_mutex_ across it.
+  bool enableBenchMode_ = false;
+  uint32_t benchHeartbeatTimeoutMs_ = 1500;
+  rclcpp::Service<astromech_msgs::srv::DomeBenchDrive>::SharedPtr benchDriveService_;
+  mutable std::mutex bench_mutex_;
+  rclcpp::Clock throttleClock_{RCL_STEADY_TIME};
+  bool benchActive_ = false;
+  int32_t benchPendingPercent_ = 0;
+  int32_t benchLastSentPercent_ = 0;
+  std::chrono::steady_clock::time_point benchLastCallTime_;
 
   // Telemetry and velocity estimation (docs/dome_diagnostics_plan.md, phase 1).
   // positionTracker_ and telemetrySequence_ are only touched from the read path.

@@ -101,6 +101,34 @@ controller manager cycle (33 ms at 30 Hz) and two report lines that arrive in
 the same cycle share a stamp; the regression velocity tolerates this, but a
 per-sample timing analysis should not assume evenly spaced samples.
 
+### Bench mode
+
+With the hardware parameter `enable_bench_mode` set to `true` the hardware node offers
+`~/bench/drive` (`astromech_msgs/srv/DomeBenchDrive`, request `int8 percent`, -100..100,
+0 stops), a raw rotate service for bench diagnostics (docs/dome_diagnostics_plan.md). With
+the parameter `false` (the default) the service does not exist.
+
+- **Raw drive.** The percentage is sent as `:DPR<p>` and is subject to the firmware's own
+  `MinSpeed` (below it the dome stops), `SpeedTarget` (clamp) and `MaxSpeed` (scale), exactly
+  as for the velocity controller (plan section 2.3). Read the values from `device.*`.
+- **Heartbeat.** A drive is kept alive by calling the service again. The service only records
+  the request; the `write()` loop sends `:DPR<p>` when the percent differs from the last one
+  sent (an identical repeat call sends nothing but refreshes the heartbeat). If no call
+  arrives within `bench_heartbeat_timeout_ms` while the last sent percent is non-zero, the
+  interface logs a WARN and sends `:DPR0`.
+- **Gating.** The call is rejected (`success: false` with a message) unless the interface is
+  active, the serial port is open and no controller holds the command interfaces
+  (command mode IDLE), so it can never fight `dome_controller`. Starting a controller while a
+  bench drive is active sends `:DPR0` first and clears the bench state, as does deactivation.
+- **Telemetry.** While a bench drive is active `~/telemetry` reports `command_mode` 3
+  (`COMMAND_MODE_BENCH`) and the sent percent in `commanded_percent`; it returns to 0 when
+  the drive stops. Settings writes are refused while `commanded_percent` is non-zero.
+
+Safety: the firmware has no watchdog in continuous rotation. The heartbeat only protects
+while this process is alive. If the process is killed (SIGKILL, crash, power loss to the
+host) the dome keeps turning at the last `:DPR` value; only a normal `on_deactivate` (which
+sends `:DPR0`) or a manual stop will halt it. Keep a human at the robot and the dome clear.
+
 ### Diagnostics
 
 While active, the hardware interface publishes a `diagnostic_msgs/DiagnosticArray`
@@ -198,6 +226,8 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `max_speed_rad_per_sec` | double | `3.14` | Maximum dome angular velocity in rad/s (~180°/s) |
 | `publish_telemetry` | bool | `false` | Publish `astromech_msgs/DomeTelemetry` on `~/telemetry` for every position report |
 | `velocity_window_s` | double | `0.5` | Trailing regression window for the velocity estimate (s), must be > 0 |
+| `enable_bench_mode` | bool | `false` | Create the raw drive service `~/bench/drive` (see [Bench mode](#bench-mode)); normally set by the `dome_bench` launch argument |
+| `bench_heartbeat_timeout_ms` | uint32 | `1500` | Send `:DPR0` if no bench drive call arrives within this time while a bench drive is active, must be > 0 |
 | `status_poll_interval_ms` | uint32 | `10000` | Interval for the `#DPSTATUS` poll that feeds `/diagnostics`; `0` disables |
 | `auto_mode` | bool | `false` | Enable AutoMode on device during startup |
 | `home_mode` | bool | `false` | Enable HomeMode on device during startup |
