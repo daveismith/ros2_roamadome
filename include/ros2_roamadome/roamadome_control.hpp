@@ -178,6 +178,12 @@ private:
   void logStartupTransition(const std::string & message);
   bool queueSetHomeHere(std::string * message);
   bool rotationInProgress(std::string * reason) const;
+  bool domeMoving() const;
+
+  // Periodic config refresh: deferred while the dome moves so the dump never
+  // competes with position reports during a move.
+  void requestConfigRefresh(const std::string & reason);
+  void serviceDeferredConfigRefresh();
   void enqueueConfigDumpWithInvalidLocked(const std::string & reason);
   void enqueueStatusPollWithInvalidLocked(const std::string & reason);
 
@@ -250,6 +256,7 @@ private:
   uint32_t startupSetupTimeoutMs_ = 10000;
   uint32_t startupMaxRetries_ = 1;
   uint32_t baudSweepSleepMs_ = 500;
+  bool serialBaudSweep_ = false;  // Only useful on a UART link; the USB CDC link ignores baud
   uint32_t startupLoopSleepMs_ = 10;
   uint32_t configStaleWarningMs_ = 30000;
   std::array<StartupCommandInfo, 8> startupCommandTable_{};
@@ -309,8 +316,12 @@ private:
   std::atomic<bool> lifecycleActive_{false};
   std::chrono::steady_clock::time_point sendQueueStageStartTime_;
   uint32_t sendQueueAckTimeoutMs_ = 3000;
-  uint32_t configRefreshIntervalMs_ = 60000;  // Default 60 seconds
+  uint32_t configRefreshIntervalMs_ = 60000;  // 0 disables the periodic refresh
   rclcpp::TimerBase::SharedPtr periodicConfigTimer_;
+  // Deferred refresh state, protected by sendQueue_mutex_.
+  bool configRefreshPending_ = false;
+  std::chrono::steady_clock::time_point configRefreshDeferredSince_;
+  uint32_t configRefreshSettleMs_ = 1000;  // Dome must be still this long before a deferred refresh
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr paramCallbackHandle_;
 
   // Setup service

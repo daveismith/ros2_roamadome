@@ -591,6 +591,37 @@ TEST_F(RoamadomeSerialPortTest, TestUnhandledLineCallback_ConsolidatedMultipleLi
 // BUFFERING TESTS - Line buffering and protocol handling
 // ============================================================================
 
+TEST_F(RoamadomeSerialPortTest, ReadDrainsAWholeConfigDumpAndTheReportsBehindItInOneCall)
+{
+  openPort();
+
+  MockObserver observer;
+  serialPort_->registerObserver(&observer);
+
+  // A config dump the size of the real one (~40 lines, >1 KB here) with five
+  // position reports queued behind it, delivered to the port all at once. One
+  // read() must consume all of it: previously only 100 bytes were taken per
+  // call, so the reports waited several cycles.
+  std::string data = "PROCESS: \"#DPCONFIG\"\n";
+  for (int i = 0; i < 60; ++i) {
+    data += "ConfigKeyNumber" + std::to_string(i) + "=" + std::to_string(1000 + i) + "\n";
+  }
+  for (int deg = 10; deg < 15; ++deg) {
+    data += "DOME POSITION: " + std::to_string(deg) + "\n";
+  }
+  data += "PROCESS: \"#DPINVALID\"\nInvalid\n";
+  ASSERT_GT(data.size(), 1024u);
+
+  writeDataAndWait(data);
+  ASSERT_TRUE(serialPort_->read());
+
+  EXPECT_EQ(observer.configUpdateCount(), 1);
+  EXPECT_EQ(observer.lastConfig().size(), 60u);
+  EXPECT_EQ(observer.positionUpdateCount(), 5);
+  EXPECT_EQ(observer.lastDegrees(), 14u);
+  EXPECT_EQ(observer.lastUnhandledLine(), "Invalid");
+}
+
 TEST_F(RoamadomeSerialPortTest, TestLineBuffering_MultipleCompleteLines)
 {
   openPort();
