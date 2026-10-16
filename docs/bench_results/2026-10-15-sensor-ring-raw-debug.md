@@ -191,3 +191,37 @@ median-of-5 and, at 252, to hold at rest), which is why the no-dome bench
 sweeps showed zero jumps and the with-dome sweeps showed many. The physical
 spots to inspect are the same three, under sensor 0 (GPIO 18) when the dome
 reads 198 and 252, and under sensor 1 (GPIO 19) at 238 and 292.
+
+## Addendum 3 (2026-10-16): new sensor plate, no dome
+
+The user replaced the plate that carries the pattern with a stiffer one. Same
+rotation run as before (35 % and 50 %, both directions, no dome;
+`ring_newplate_run.csv`, about 25 revolutions, 8010 ring samples).
+
+| Spurious "B" by track position | Old plate, no dome | New plate, no dome |
+|---|---|---|
+| sensor 0 at 198-201 / 234-237 / 252 | 11 / 0 / 4 | 0 / 0 / 0 |
+| sensor 1 at 198-201 / 237 / 252 | 7 / 4 / 4 | 0 / 0 / 0 |
+| raw glitches total | 37 | 13 |
+
+Sensors 0 and 1 are clean: no spurious reading anywhere on the track, and the
+per-sensor mismatch statistics for sensors 0 and 1 now match the other seven.
+The three bad spots were on the old plate.
+
+The 13 remaining glitches are all the same event: going in the
+angle-decreasing direction through dome angle 264, sensor 3 sets one sample
+before sensor 1 clears, so the raw code reads 154 (`BBBBBBB--`) for one
+sample between 265 and 263 instead of the adjacent code for 264. This is a
+race between two pattern edges that lie within a degree of each other (track
+edges 144 under sensor 3 and 225 under sensor 1 at that dome angle); the
+code is not a Gray code, so the order in which they switch decides whether
+the intermediate code is adjacent or far. It is one sample wide, only in one
+direction, and the ring's median filter already removes it (the filtered
+angle stayed at 266). The old plate had the same class of event at other
+angles (sensors 3, 4 and 6). It is a property of the pattern and the
+alignment tolerance, not a defect, but it is the reason a one-bit plausibility
+gate in the ring firmware would still be worthwhile.
+
+Note: the controller's `#DPREPORT28` was swallowed by its boot banner at the
+start of this run, so there are no controller-side reports for it; the raw
+ring data and the phase timestamps are sufficient for this analysis.
