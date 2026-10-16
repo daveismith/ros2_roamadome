@@ -656,6 +656,51 @@ degree `DecelerationScale` is too short for a dome whose response time is
 `device.speed_target` for position moves are the firmware-side knobs to try.
 Without the dome (phase 2 check) the same moves overshot by only a few degrees.
 
+## Position-move tuning (2026-10-16, after the run)
+
+Method and data: `/home/pi/dome_bench/pos_tune/` (`run1.csv` to `run3.csv`,
+`pos_tune.py`, `pos_tune_analyze.py`); procedure written up in the README,
+re-tuning section (g).
+
+Stopping distance after `:DPR0` from steady rotation (dome installed), symmetric:
+
+| percent | steady deg/s | stop distance deg | stop time s |
+|---|---|---|---|
+| 32 / -32 | 43 / 37 | 12 / 8 | 0.65 / 0.60 |
+| 36 / -36 | 57 / 81 | 16 / 17 | 0.70 / 0.75 |
+| 35 / -35 | 73 / 58 | 19 / 18 | 0.65 / 0.70 |
+| 50 / -50 | 141 / 155 | 46 / 45 | 0.80 / 0.90 |
+| 70 / -70 | 229 / 257 | 90 / 89 | 1.05 / 1.00 |
+| 100 / -100 | 392 / 369 | 161 / 171 | 1.10 / 1.20 |
+
+Fit: `d_stop = 0.469 s x v - 18.2 deg`. Position moves (150 and 40 deg, both
+directions) under candidate settings, rest error per move:
+
+| SpeedTarget | DecelerationScale | Fudge | rest errors | arrival speed at fudge |
+|---|---|---|---|---|
+| 100 | 50 | 5 (original) | +47 -30 +3 -13 +49 -22 | 80-210 deg/s |
+| 100 | 150 | 5 | +18 -3 -20* -1 +21 0 | 44-126 |
+| 60 | 150 | 5 | +14 -2 +5 -2 +11 -4 | 41-102 |
+| 45 | 200 | 5 | +10 0 +12 -1 +7 -1 | 25-84 |
+| 35 | 250 | 5 | +12 -4 +10 -5 +10 +2 | 38-96 |
+| 45 | 250 | 8 | +6 -6 0 -8 +2 -10 | 52-89 |
+| 45 | 250 | 12 | -6 -8 -7 -1 -8 -6 | 30-98 |
+| 60 | 250 | 10 | -2 -5 -2 -1 -5 -2 | 52-98 |
+
+`*` the 40 degree move at the 32 % floor stalled 20 degrees short at a tight spot
+near 200 degrees (no REACHED TARGET).
+
+The arrival speed at the floor command varies by a factor of two with the end
+angle (position-dependent friction, the same tight spots seen in the sweeps),
+not consistently by direction, which is why a fudge in the middle of the
+stopping-distance range (10 deg) balances the moves. With the 250 degree taper
+the firmware's own deceleration ramp divisor (the same setting) is also at its
+slowest, which did not hurt here because the ramp jumps on direction changes.
+
+Applied: `SpeedTarget` 60, `DecelerationScale` 250, `Fudge` 10 (all acked and
+persisted). Originals were 100 / 50 / 5. Follow-up for the bench node: a
+`start_position_sweep` service that automates these two measurements.
+
 ## Next
 
 Phase 7 can proceed with [THE VALUES TO CONFIGURE](#the-values-to-configure). Set the acceptance

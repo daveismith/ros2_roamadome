@@ -311,9 +311,9 @@ Worked example: this is exactly the situation on the bench robot.
   ([docs/bench_results/2026-10-16-with-dome-new-plate.md](docs/bench_results/2026-10-16-with-dome-new-plate.md)).
 
 **The 2026-10-16 with-dome report is the calibration reference. These are the values to
-configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 32, SpeedTarget 100, Scaling off;
-`MinSpeed` was raised from 15 to 32 on 2026-10-16 after this run, see the report's
-"MinSpeed follow-up" section):
+configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 32, SpeedTarget 60, DecelerationScale 250, Fudge 10, Scaling off;
+`MinSpeed` was raised from 15 to 32 and the position-move settings tuned on 2026-10-16
+after this run, see the report's "MinSpeed follow-up" and "Position-move tuning" sections):
 
 - `max_speed_rad_per_sec` **6.56**: the lower measured 100 % rate, from -100 % in the
   operating-settings run. The raw run measured 6.70, and the JSON's fit value is 6.88.
@@ -522,6 +522,44 @@ used and the result in the bench report.
 `Scaling` adds ramps). The fit is valid only for the values it was measured with, which are
 recorded in each run's `settings_before.json`. Changing any of them, through `device.*`, the
 firmware menu or `#DP` commands, invalidates the fit: re-run (b) to (d).
+
+**(g) Position-move tuning: `DecelerationScale`, `SpeedTarget` and `Fudge`.** The
+firmware's position move tapers the commanded percent from `SpeedTarget` down to the
+`MinSpeed` floor over the last `DecelerationScale` degrees, then cuts the motor at the
+`Fudge` boundary; the Sabertooth ramp and the dome's inertia carry it on from there. So
+the rest error is the stopping distance at the arrival speed minus the fudge, and the
+settings are determined from two bench measurements (scripts in
+`/home/pi/dome_bench/pos_tune/`, `pos_tune.py` and `pos_tune_analyze.py`, driving the
+controller directly with no controllers loaded):
+
+1. Stopping-distance curve: steady `:DPR p` for 5 s, then `:DPR0`, for p = 35, 50, 70,
+   100 in both directions; record the travel from the stop command to standstill. On
+   the assembled dome (2026-10-16) it is close to linear, `d_stop = 0.47 s x v - 18
+   deg` (19 deg from 73 deg/s, 46 from 141, 90 from 229, 161 from 392), and symmetric.
+2. Position moves (150 and 40 deg, both directions, several end angles) under candidate
+   settings, measuring the arrival speed at the fudge boundary, the overshoot and the
+   rest error. Choose `DecelerationScale` large enough that the dome has actually slowed
+   to the floor speed before the boundary (250, the maximum, on this dome: its response
+   time is 1.5 s, so 50 deg is far too short), `SpeedTarget` for the cruise speed you
+   want on long moves (it does not change the accuracy once the taper is long enough;
+   60 gives about 2 rad/s and 3 s per 150 deg move), and `Fudge` equal to the stopping
+   distance at the floor arrival speed. The floor speed varies with dome angle (position-
+   dependent friction: 40 to 100 deg/s at 32 % here), so set the fudge at the middle of
+   that range and check both directions at several end angles.
+
+Measured on the assembled dome, new plate, MinSpeed 32:
+
+| SpeedTarget | DecelerationScale | Fudge | rest error over 6 moves |
+|---|---|---|---|
+| 100 | 50 | 5 (original) | +47, -30, +3, -13, +49, -22 |
+| 100 | 150 | 5 | +18, -3, -20 (stalled short), -1, +21, 0 |
+| 45 | 200 | 5 | +10, 0, +12, -1, +7, -1 |
+| 45 | 250 | 8 | +6, -6, 0, -8, +2, -10 |
+| **60** | **250** | **10** | **-2, -5, -2, -1, -5, -2** |
+
+`SpeedTarget` 60, `DecelerationScale` 250 and `Fudge` 10 are now set (written 2026-10-16
+after the with-dome run) and are part of the calibration state together with MinSpeed 32.
+Redo this step after any change to the dome's mass or friction, or to `MinSpeed`.
 
 **(f) Until phase 7 lands** the plugin still uses the linear mapping
 `percent = velocity / max_speed_rad_per_sec * 100`, rounded and clamped to ±100, with the sign
