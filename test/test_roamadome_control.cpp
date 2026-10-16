@@ -2874,4 +2874,48 @@ TEST_F(RoamadomeControlTest, ConfigRefresh_DeferredWhileRotatingThenSentAfterSet
   ASSERT_TRUE(firmware.waitFor("#DPCONFIG", 500));
 }
 
+
+TEST_F(RoamadomeControlTest, PositionReportGap_CountedInDiagnostics)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+  info.hardware_parameters["report_gap_warn_ms"] = "100";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  AckFirmware firmware(&pty);
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.028);
+  auto feed = [&](int degrees) {
+      pty.writeText("DOME POSITION: " + std::to_string(degrees) + "\n");
+      std::this_thread::sleep_for(std::chrono::milliseconds(15));
+      ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+    };
+
+  feed(10);
+  feed(11);
+  EXPECT_EQ(diagnosticsStateForTest().report_gaps, 0u);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  feed(12);
+  const DomeDiagnosticsState state = diagnosticsStateForTest();
+  EXPECT_EQ(state.report_gaps, 1u);
+  EXPECT_GT(state.last_report_gap_s, 0.2);
+  feed(13);
+  EXPECT_EQ(diagnosticsStateForTest().report_gaps, 1u);
+}
+
 }  // namespace ros2_roamadome

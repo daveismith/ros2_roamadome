@@ -70,6 +70,24 @@ TEST(DomeDiagnostics, ThreeStatusesWithStableNames)
   }
 }
 
+TEST(DomeDiagnostics, ReportGapsAreCountedAndReported)
+{
+  DomeDiagnosticsState state;
+  EXPECT_DOUBLE_EQ(recordPositionReport(&state, at(0.0), 0.25), 0.0);
+  EXPECT_NEAR(recordPositionReport(&state, at(0.033), 0.25), 0.033, 1e-6);
+  EXPECT_EQ(state.report_gaps, 0u);
+  EXPECT_NEAR(recordPositionReport(&state, at(0.4), 0.25), 0.367, 1e-6);
+  EXPECT_EQ(state.report_gaps, 1u);
+  EXPECT_NEAR(state.last_report_gap_s, 0.367, 1e-6);
+  // Disabled threshold counts nothing.
+  recordPositionReport(&state, at(2.0), 0.0);
+  EXPECT_EQ(state.report_gaps, 1u);
+
+  const auto statuses = buildDomeDiagnostics(state, healthyReadings(), {}, at(2.1));
+  EXPECT_EQ(value(find(statuses, "roamadome: link"), "report_gaps"), "1");
+  EXPECT_EQ(value(find(statuses, "roamadome: link"), "last_report_gap_s"), "0.367");
+}
+
 TEST(DomeDiagnostics, LinkWarnsWithoutReportsAndWhenStale)
 {
   DomeDiagnosticsState state;

@@ -240,10 +240,19 @@ void applyStatusSection(
   ++state->status_polls_answered;
 }
 
-void recordPositionReport(DomeDiagnosticsState * state, TimePoint now)
+double recordPositionReport(DomeDiagnosticsState * state, TimePoint now, double gap_warn_s)
 {
+  double gap_s = 0.0;
+  if (state->last_position_report.has_value()) {
+    gap_s = std::chrono::duration<double>(now - *state->last_position_report).count();
+    if (gap_warn_s > 0.0 && gap_s > gap_warn_s) {
+      ++state->report_gaps;
+      state->last_report_gap_s = gap_s;
+    }
+  }
   ++state->position_reports;
   state->last_position_report = now;
+  return gap_s;
 }
 
 std::vector<DiagnosticStatus> buildDomeDiagnostics(
@@ -278,6 +287,8 @@ std::vector<DiagnosticStatus> buildDomeDiagnostics(
     addValue(&link, "serial_open", readings.serial_open ? "true" : "false");
     addValue(&link, "position_reports", std::to_string(state.position_reports));
     addValue(&link, "last_report_age_s", formatAge(state.last_position_report, now));
+    addValue(&link, "report_gaps", std::to_string(state.report_gaps));
+    addValue(&link, "last_report_gap_s", formatDouble(state.last_report_gap_s, 3));
     addValue(&link, "position_reporting_enabled",
       state.position_reporting_enabled ? "true" : "false");
     addValue(&link, "status_polls_answered", std::to_string(state.status_polls_answered));
