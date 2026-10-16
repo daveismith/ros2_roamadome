@@ -284,6 +284,185 @@ The same applies when the whole launch is stopped with Ctrl-C during a sweep: th
 manager deactivates the hardware (which sends `:DPR0`) at the same time, so the bench node
 cannot write settings any more. Abort the sweep first and wait for `~/status` to report `idle`.
 
+### Re-tuning the velocity mapping when the dome changes
+
+The velocity mapping (rad/s to `:DPR` percent) is a measurement of one mechanical setup. Repeat
+this procedure whenever that setup changes: dome shell mounted or removed, added weight,
+bearing or drive-train friction changed, a new motor or motor controller, or a change to the
+firmware's `MaxSpeed`, `MinSpeed`, `SpeedTarget` or `Scaling`.
+
+Worked example: this is exactly the situation on the bench robot. The first sweeps
+(2026-10-14, [docs/bench_results/2026-10-14-no-dome-baseline.md](docs/bench_results/2026-10-14-no-dome-baseline.md))
+were taken with **no dome installed**, the motor driving only the bare base platform. Those
+numbers are the no-dome baseline, kept for comparison only. When the dome is mounted, run both
+sweeps again as below and configure the plugin with the **assembled-dome** values; replace any
+`velocity_map.*` and `max_speed_rad_per_sec` values that came from the baseline.
+
+**(a) Prerequisites and safety.**
+
+- A human at the robot for the whole session, the dome clear of cables, tools and hands. A
+  sweep spins the dome continuously up to 100 % motor output in both directions.
+- A bench-enabled hardware node with telemetry and **no controller holding the dome**: either
+  the robot launch with `dome_bench:=true` (it sets `enable_bench_mode` and `publish_telemetry`,
+  skips the `dome_controller` spawner and the dome teleop, and starts `roamadome_bench`):
+
+  ```bash
+  ros2 launch r2_bringup launch_robot.launch.py dome_bench:=true
+  ```
+
+  or a stand-alone stack with only the RoamADome hardware (the same two parameters set) plus
+  `ros2 run ros2_roamadome roamadome_bench --ros-args -p output_dir:=~/dome_bench`.
+  `ros2 control list_controllers` must not list `dome_controller` as active.
+- Note the firmware settings first (`ros2 param get /roamadome device.max_speed`, and
+  `min_speed`, `speed_target`, `scaling`). They are part of the calibration state (see (e)).
+  The bench node never writes `inverted`, `home_pos` or `auto_safety`; neither should you.
+
+**(b) Run the sweeps.** Speed sweep first, so the sensor sweep takes its jump threshold
+(1.5 x the measured maximum) and its minimum percentages from it. Start one sweep at a time
+and wait for `"state": "idle"` on the status topic before the next:
+
+```bash
+ros2 service call /roamadome_bench/start_speed_sweep std_srvs/srv/Trigger
+ros2 topic echo /roamadome_bench/status          # about 3 min; wait for "state": "idle"
+ros2 service call /roamadome_bench/start_sensor_sweep std_srvs/srv/Trigger
+ros2 topic echo /roamadome_bench/status          # about 5 min
+```
+
+Abort at any time with `ros2 service call /roamadome_bench/abort std_srvs/srv/Trigger`. Each
+sweep writes `<output_dir>/<YYYYmmdd-HHMMSS>-speed/` and `...-sensor/` (`output_dir` defaults to
+`~/dome_bench`), with `speed_sweep.json` / `sensor_sweep.json`, `samples.csv`, `run.json` and
+the settings files ([Bench node](#bench-node)). Then:
+
+```bash
+ros2 param get /roamadome device.max_speed     # back at the value noted in (a), likewise speed_target, scaling
+ros2 run ros2_roamadome roamadome_bench_report ~/dome_bench/<run>-speed --check
+ros2 run ros2_roamadome roamadome_bench_report ~/dome_bench/<run>-sensor --check
+```
+
+A run passes when:
+
+- `run.json` has `"status": "complete"` and `"settings_restored": true`, and
+  `settings_after.json` has `"firmware_acked": true` (if not, restore by hand from
+  `settings_before.json`, see above);
+- speed sweep: `angle_sign_consistent` true; in both `directions`, a 100 % step moved,
+  `min_percent_bracketed` true, `stalled_above_min_percent` and `wrong_direction_steps` empty,
+  and `fit.r_squared` about 0.99 (0.994 and 0.997 on the baseline);
+- sensor sweep: `config.max_plausible_source` names the speed sweep just run, and
+  `suggested_pass` true (no jumps, no reversals). Jumps that cluster in the
+  `jump_start_histogram` point at a misaligned sensor track: fix the mechanics and re-run the
+  sensor sweep;
+- `--check` exits 0.
+
+The speed sweep runs with `speed_sweep.raw_motor` true by default (MaxSpeed 100, SpeedTarget
+100, Scaling off during the sweep), but the plugin drives the dome at the operating settings.
+On the 2026-10-14 firmware the two gave the same results (MaxSpeed had no measurable effect on
+`:DPR`), so the raw fit applies. Check it again after a firmware change: run a second speed
+sweep at the operating settings and compare. If they differ, use the operating-settings run:
+
+```bash
+ros2 param set /roamadome_bench speed_sweep.raw_motor false
+ros2 service call /roamadome_bench/start_speed_sweep std_srvs/srv/Trigger
+```
+
+Write the results up next to the baseline in `docs/bench_results/` (report plus the result
+JSON files, not the CSVs), with the dome configuration in the title.
+
+**(c) Map the speed result onto the hardware parameters.** The `phase7` block of
+`speed_sweep.json` is keyed by the sign of the **joint** velocity (the reported angle's
+direction, the same sign as `position` and `velocity_rad_s` in the telemetry):
+
+```json
+"phase7": {
+  "positive_velocity": {"percent_sign": -1, "k_percent_per_rad_s": ..., "p0_percent": ..., "min_percent": ...},
+  "negative_velocity": {"percent_sign": 1,  "k_percent_per_rad_s": ..., "p0_percent": ..., "min_percent": ...},
+  "max_speed_rad_per_sec": ...
+}
+```
+
+| Result field | Hardware parameter (plan phase 7) | Meaning |
+|--------------|-----------------------------------|---------|
+| `phase7.<dir>.k_percent_per_rad_s` | `velocity_map.k_percent_per_rad_s` | Percent per rad/s above `p0` |
+| `phase7.<dir>.p0_percent` | `velocity_map.p0_percent` | Percent at which the fitted speed reaches zero |
+| `phase7.<dir>.min_percent` | `velocity_map.min_percent` | Lowest percent that kept the dome moving |
+| `phase7.<dir>.percent_sign` | sign convention | Sign of the `:DPR` percent that produces that joint direction |
+| `directions.*.omega_max_measured_rad_s` (the lower of the two) | `max_speed_rad_per_sec` | Measured rate at 100 % |
+
+`<dir>` is `positive_velocity` or `negative_velocity`. The plan allows each `velocity_map.*`
+value per direction; use the per-direction parameter names exactly as listed in
+[Configuration Parameters](#configuration-parameters) once phase 7 has merged, and if only one
+set is supported, take the larger `min_percent` and `p0_percent` of the two. For
+`max_speed_rad_per_sec` use the measured 100 % values, not `phase7.max_speed_rad_per_sec`,
+which is the lower of the two fit extrapolations k (100 - p0) (6.50 against a measured 6.35
+rad/s on the baseline).
+
+Sign convention: on the bench robot (firmware `Inverted` true) a **positive** percent moves the
+reported angle **down**, so positive joint velocity needs a negative percent
+(`positive_velocity.percent_sign` -1). The sweep measures this every time
+(`angle_sign_for_positive_percent`). If a re-run reports the opposite sign, something in the
+wiring or the `Inverted` setting changed: find out what before configuring anything.
+
+Set the values in the RoamADome block of `src/r2_bringup/urdf/ros2_control.xacro`, outside the
+`dome_bench` condition so they apply to normal launches:
+
+```xml
+<ros2_control name="RoamADome" type="actuator">
+    <hardware>
+        <plugin>ros2_roamadome/RoamadomeControl</plugin>
+        <param name="serial_port">...</param>
+        <param name="max_speed_rad_per_sec">MEASURED_RATE_AT_100</param>
+        <param name="velocity_map.k_percent_per_rad_s">K</param>
+        <param name="velocity_map.p0_percent">P0</param>
+        <param name="velocity_map.min_percent">MIN</param>
+        <!-- assembled-dome values from docs/bench_results/<date>-<dome>.md -->
+        ...
+```
+
+Then rebuild and relaunch:
+
+```bash
+cd ~/r2_ws
+colcon build --symlink-install --packages-select r2_bringup
+source install/setup.bash
+ros2 launch r2_bringup launch_robot.launch.py dome_bench:=true   # for the check in (d)
+```
+
+**(d) Acceptance check** (plan phase 7): a commanded 0.5 rad/s gives a telemetry velocity
+within 10 % of 0.5 rad/s, in both directions, after settling. Use the `dome_bench:=true` launch
+(telemetry on, no `dome_controller`), make sure no sweep runs, then load the velocity
+controller by hand; the bench drive is refused while it holds the dome:
+
+```bash
+ros2 control load_controller --set-state active dome_controller
+ros2 topic pub -r 10 /dome_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"
+# second terminal, after about 2 s of settling: mean and sample count over 5 s
+timeout 5 ros2 topic echo /roamadome/telemetry --field velocity_rad_s \
+  | grep -E '^-?[0-9]' | awk '{s += $1; n++} END {print s / n, n}'
+# Ctrl-C the publisher, stop the dome, repeat with -0.5
+ros2 topic pub --once /dome_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.0]}"
+```
+
+Pass: the mean is between 0.45 and 0.55 for +0.5 and between -0.55 and -0.45 for -0.5. Then
+`ros2 topic pub --once ... "{data: [0.0]}"`, `ros2 control set_controller_state dome_controller
+inactive` and `ros2 control unload_controller dome_controller`, and relaunch without
+`dome_bench` for normal use. If 0.5 rad/s is below `velocity_at_min_percent_rad_s` of a
+direction, the mapping clamps up to `min_percent` and the check cannot pass in that direction;
+on the no-dome baseline it was marginal (0.55 and 0.63 rad/s at the minimum percentages).
+Record the result in the bench report.
+
+**(e) The firmware settings are part of the calibration.** `MaxSpeed`, `SpeedTarget`,
+`MinSpeed` and `Scaling` all sit between the percent the plugin sends and the motor
+(plan 2.3: `MinSpeed` zeroes small percentages, `SpeedTarget` clamps, `MaxSpeed` scales,
+`Scaling` adds ramps). The fit is valid only for the values it was measured with, which are
+recorded in each run's `settings_before.json`. Changing any of them, through `device.*`, the
+firmware menu or `#DP` commands, invalidates the fit: re-run (b) to (d).
+
+**(f) Until phase 7 lands** the plugin still uses the linear mapping
+`percent = velocity / max_speed_rad_per_sec * 100`, rounded and clamped to ±100, with the sign
+passed straight through (so on the bench robot a positive velocity command moves the joint
+negative) and no minimum-percent handling (below about 25 % the dome stalls). Only
+`max_speed_rad_per_sec` applies; set it to the measured rate at 100 % so that full scale
+matches. The `velocity_map.*` values stay in the bench report until the plugin accepts them.
+
 ### Diagnostics
 
 While active, the hardware interface publishes a `diagnostic_msgs/DiagnosticArray`
