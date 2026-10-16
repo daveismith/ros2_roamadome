@@ -225,3 +225,35 @@ gate in the ring firmware would still be worthwhile.
 Note: the controller's `#DPREPORT28` was swallowed by its boot banner at the
 start of this run, so there are no controller-side reports for it; the raw
 ring data and the phase timestamps are sufficient for this analysis.
+
+## Addendum 4 (2026-10-16): new plate, dome on
+
+The dome was mounted on the new plate and the same rotation run was repeated at 35 % and 50 %,
+both directions (`ring_newplate_dome_run.csv` and `ctl_newplate_dome_run.csv`). The run covered
+about 22 revolutions and 7493 ring samples, plus parked holds at 238 and 200.
+
+| Spurious "B" by track position | Old plate, dome | New plate, dome |
+|---|---|---|
+| sensor 0 at 198-201 / 234-237 / 252 | 18 / 6 / 6 | 0 / 0 / 0 |
+| sensor 1 at 198-201 / 237 / 252 | 5 / 9 / 5 | 0 / 0 / 0 |
+| raw glitches per 1000 samples | 5.0 | 1.5 (11 in 7493) |
+
+- **Sensors 0 and 1 are clean with the dome on.** Nothing spurious anywhere on the track, and the
+  parked holds at 238 and 200 were steady.
+- **The 11 raw glitches are all the angle-264 edge race from addendum 3.** Going in the
+  angle-decreasing direction, sensor 3 sets one sample before sensor 1 clears, at track position
+  144. The race is one sample wide, and the median filter removes it.
+- **Controller side.** In the `DOME POSITION` stream, position steps over 8 degrees were only the
+  359/0 wraparound.
+
+The bench sweeps on this plate with the dome
+([2026-10-16-with-dome-new-plate.md](2026-10-16-with-dome-new-plate.md)) agree. Over about 309
+revolutions there was no spike or excursion, and the firmware's sensor error counter rose by 3 in
+total (2.2 to 2.9 per revolution on the old plate). The dome no longer turns a marginal sensor into
+position jumps. The fault was in the old plate.
+
+A separate, older property shows up near 0 degrees. The ring's filtered angle almost never takes
+the values 358 to 1, on both plates and with or without the dome. The controller therefore steps
+from 355 straight to 4, about 9 degrees in one report. This is not a glitch: it is the same on
+every pass. At 100 % it brings one step per revolution to the bench node's jump threshold (see that
+report).
