@@ -296,9 +296,10 @@ Worked example: this is exactly the situation on the bench robot. The first swee
 were taken with **no dome installed**, the motor driving only the bare base platform. The same
 sweeps were then repeated with the dome mounted
 ([docs/bench_results/2026-10-14-with-dome.md](docs/bench_results/2026-10-14-with-dome.md), with a
-side-by-side comparison). **The with-dome values are the ones to configure**; the no-dome numbers
-are kept for comparison only, and any `velocity_map.*` or `max_speed_rad_per_sec` value taken from
-them must be replaced. With the dome:
+side-by-side comparison). The mapping needs with-dome values; the no-dome numbers are kept for
+comparison only, and any `velocity_map.*` or `max_speed_rad_per_sec` value taken from them must be
+replaced. With the dome, **measured on the old sensor pattern plate** (replaced on 2026-10-16; see
+below, re-measure before configuring):
 
 - `max_speed_rad_per_sec` **6.56** (the lower measured 100 % rate; the JSON's fit value is 6.77);
 - `positive_velocity`: `percent_sign` -1, `k_percent_per_rad_s` 11.76, `p0_percent` 20.01;
@@ -320,6 +321,17 @@ bit 0 (`SENSORS[0]`) fault came back at the same true angles (198-201 and 232-23
 bit 1 fault appeared at 239 and 277 deg. The fault follows the dome angle and survives re-seating,
 so it is not a one-off. Fix the sensor ring mechanics (gap and alignment of those sensors at those
 angles) before trusting the dome position. The speed values above were confirmed within 2-4 %.
+
+On 2026-10-16 the sensor pattern plate was replaced with a stiffer one, and the no-dome sweeps
+were re-run on it
+([docs/bench_results/2026-10-16-no-dome-new-plate.md](docs/bench_results/2026-10-16-no-dome-new-plate.md)).
+That report is now the **current no-dome reference**; it supersedes the 2026-10-14 baseline. On
+the new plate, without the dome, the sensor sweep passed (0 jumps, 0 reversals) and the firmware's
+sensor error counter stayed at 0 (2.5 to 2.9 per revolution on the old plate). The speeds matched
+the old baseline within its run-to-run scatter: 100 % gave 6.69 / 6.65 rad/s, k 0.083 / 0.082
+rad/s per %, p0 17.2 / 17.1, and `min_percent` 27 / 25 raw and 32 / 25 at the operating settings.
+**The with-dome values quoted above come from the old plate.** Re-measure them with the dome
+mounted on the new plate before configuring anything. Phase 7 waits for that run.
 
 **(a) Prerequisites and safety.**
 
