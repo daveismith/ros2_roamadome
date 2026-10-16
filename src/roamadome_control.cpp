@@ -1027,6 +1027,7 @@ void RoamadomeControl::handleSendQueueFeedback(const std::string & line)
     // written, so there is nothing to refresh.
     RCLCPP_INFO(logger_, "Received 'Unchanged' for %s; ack complete, no config refresh",
       activeSendQueueCommand_.label.c_str());
+    recordSettingsAckLocked(false);
     sendQueueCommandActive_ = false;
     sendQueueStage_ = SendQueueStage::IDLE;
     return;
@@ -1037,6 +1038,7 @@ void RoamadomeControl::handleSendQueueFeedback(const std::string & line)
     if (activeSendQueueCommand_.post_ack_config_dump) {
       enqueueConfigDumpWithInvalidLocked("post-update");
     }
+    recordSettingsAckLocked(false);
     sendQueueCommandActive_ = false;
     sendQueueStage_ = SendQueueStage::IDLE;
   }
@@ -1336,6 +1338,9 @@ hardware_interface::return_type RoamadomeControl::write(
           "Timed out waiting for ack stage (%d) for %s after %lld ms",
           static_cast<int>(sendQueueStage_), activeSendQueueCommand_.label.c_str(),
           static_cast<long long>(elapsed_ms));
+        if (SendQueueCommand::Flow::PARAMETER_UPDATE_ACK == activeSendQueueCommand_.flow) {
+          recordSettingsAckLocked(true);
+        }
         sendQueueCommandActive_ = false;
         sendQueueStage_ = SendQueueStage::IDLE;
       }
@@ -1831,6 +1836,34 @@ void RoamadomeControl::handleStatusSection(const std::vector<std::string> & stat
   applyStatusSection(&diagnosticsState_, status, std::chrono::steady_clock::now());
 }
 
+uint32_t RoamadomeControl::settingsWritesPendingLocked() const
+{
+  uint32_t pending = 0;
+  auto queue_copy = sendQueue_;
+  while (!queue_copy.empty()) {
+    if (SendQueueCommand::Flow::PARAMETER_UPDATE_ACK == queue_copy.front().flow) {
+      ++pending;
+    }
+    queue_copy.pop();
+  }
+  if (sendQueueCommandActive_ &&
+    SendQueueCommand::Flow::PARAMETER_UPDATE_ACK == activeSendQueueCommand_.flow)
+  {
+    ++pending;
+  }
+  return pending;
+}
+
+void RoamadomeControl::recordSettingsAckLocked(bool timed_out)
+{
+  std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+  if (timed_out) {
+    ++diagnosticsState_.settings_ack_timeouts;
+  } else {
+    ++diagnosticsState_.settings_acks;
+  }
+}
+
 void RoamadomeControl::publishDiagnostics()
 {
   auto publisher = diagnosticsPublisher_;
@@ -1846,6 +1879,10 @@ void RoamadomeControl::publishDiagnostics()
   readings.velocity_rad_s = velocity_;
   readings.commanded_percent = lastCommandedPercent_.load();
   readings.command_mode = telemetryCommandMode_.load();
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    readings.settings_writes_pending = settingsWritesPendingLocked();
+  }
 
   diagnostic_msgs::msg::DiagnosticArray msg;
   msg.header.stamp = node->now();

@@ -205,6 +205,11 @@ private:
   void handleClassifiedLine(const std::string & line);
   void handleStatusSection(const std::vector<std::string> & status);
   void publishDiagnostics();
+  /// Ack-tracked settings writes queued plus one if active. Caller holds sendQueue_mutex_.
+  uint32_t settingsWritesPendingLocked() const;
+  /// Count a completed or timed-out settings ack in diagnosticsState_. Caller holds
+  /// sendQueue_mutex_; lock order is sendQueue_mutex_ then diagnostics_mutex_.
+  void recordSettingsAckLocked(bool timed_out);
   void recordCommandedPercent(int32_t percentage);
   static uint8_t telemetryCommandModeValue(CommandMode mode);
 

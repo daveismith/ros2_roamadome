@@ -68,6 +68,12 @@ struct DomeDiagnosticsState
   uint32_t out_of_range_rejections = 0;
   uint32_t setup_failures = 0;
   std::optional<int32_t> setup_good_max_speed;
+
+  // Settings writes (ack-tracked #DP... commands from device.* writes and set_home_here)
+  /// Completed by the firmware: "Write Settings" + "Updated", or "Unchanged".
+  uint32_t settings_acks = 0;
+  /// Abandoned after the ack timeout without a reply (the write may not be in flash).
+  uint32_t settings_ack_timeouts = 0;
 };
 
 /// @brief Live values the diagnostics report alongside the accumulated state.
@@ -80,6 +86,8 @@ struct DomeDiagnosticsReadings
   int32_t commanded_percent = 0;
   /// 0 idle, 1 position, 2 velocity, 3 bench (astromech_msgs/DomeTelemetry).
   uint8_t command_mode = 0;
+  /// Ack-tracked settings writes queued, plus one if a write is waiting for its ack.
+  uint32_t settings_writes_pending = 0;
 };
 
 struct DomeDiagnosticsOptions

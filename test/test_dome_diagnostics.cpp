@@ -195,6 +195,28 @@ TEST(DomeDiagnostics, NoSensorErrorsLineReadsAsZero)
   EXPECT_EQ(*state.sensor_errors, 0u);
 }
 
+TEST(DomeDiagnostics, MotionReportsSettingsWritePipeline)
+{
+  DomeDiagnosticsState state;
+  DomeDiagnosticsReadings readings = healthyReadings();
+  auto motion = find(buildDomeDiagnostics(state, readings, DomeDiagnosticsOptions(), at(1.0)),
+      "roamadome: motion");
+  EXPECT_EQ(value(motion, "settings_writes_pending"), "0");
+  EXPECT_EQ(value(motion, "settings_acks"), "0");
+  EXPECT_EQ(value(motion, "settings_ack_timeouts"), "0");
+
+  state.settings_acks = 3;
+  state.settings_ack_timeouts = 1;
+  readings.settings_writes_pending = 2;
+  motion = find(buildDomeDiagnostics(state, readings, DomeDiagnosticsOptions(), at(1.0)),
+      "roamadome: motion");
+  EXPECT_EQ(value(motion, "settings_writes_pending"), "2");
+  EXPECT_EQ(value(motion, "settings_acks"), "3");
+  EXPECT_EQ(value(motion, "settings_ack_timeouts"), "1");
+  // The counters are informational: they never change the level.
+  EXPECT_EQ(motion.level, DiagnosticStatus::OK);
+}
+
 TEST(DomeDiagnostics, MotionValuesTrackAcceptedCommands)
 {
   DomeDiagnosticsState state;

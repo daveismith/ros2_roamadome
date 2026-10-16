@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Re-run the bench analysis offline on a run directory and print the result JSON.
+
+Usage: roamadome_bench_report RUN_DIR [--set KEY=VALUE ...] [--check] [--output FILE]
+
+RUN_DIR holds run.json and samples.csv as written by roamadome_bench (a path to
+samples.csv is accepted too). --set overrides an analysis config value, for
+example --set max_plausible_deg_s=400 to re-score jumps with another
+threshold. --check compares the result with the saved <sweep>_sweep.json and
+exits 1 if they differ. Needs no ROS: only the Python standard library.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+from ros2_roamadome.bench import analysis
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    parser.add_argument('run_dir', help='run directory (or its samples.csv)')
+    parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
+                        help='override an analysis config value (JSON value)')
+    parser.add_argument('--check', action='store_true',
+                        help='exit 1 if the result differs from the saved result JSON')
+    parser.add_argument('--output', help='also write the result JSON to this file')
+    args = parser.parse_args(argv)
+
+    run_dir = args.run_dir
+    if os.path.isfile(run_dir):
+        run_dir = os.path.dirname(os.path.abspath(run_dir))
+    run_info = analysis.read_json(os.path.join(run_dir, analysis.RUN_JSON))
+    for item in args.set:
+        key, _, value = item.partition('=')
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = value
+        run_info.setdefault('config', {})[key] = parsed
+    rows = analysis.read_csv(os.path.join(run_dir, analysis.SAMPLES_CSV))
+    result = analysis.analyze_run(run_info, rows)
+    text = analysis.dumps_json(result)
+    sys.stdout.write(text)
+    if args.output:
+        analysis.write_json(args.output, result)
+    if args.check:
+        saved_path = os.path.join(run_dir, analysis.result_filename(run_info['sweep']))
+        with open(saved_path) as f:
+            saved = f.read()
+        if saved != text:
+            sys.stderr.write('result differs from %s\n' % saved_path)
+            return 1
+        sys.stderr.write('result matches %s\n' % saved_path)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

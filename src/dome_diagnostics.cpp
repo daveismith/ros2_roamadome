@@ -340,6 +340,10 @@ std::vector<DiagnosticStatus> buildDomeDiagnostics(
     addValue(&motion, "out_of_range_rejections", std::to_string(state.out_of_range_rejections));
     addValue(&motion, "setup_failures", std::to_string(state.setup_failures));
     addValue(&motion, "velocity_rad_s", formatDouble(readings.velocity_rad_s));
+    addValue(&motion, "settings_writes_pending",
+      std::to_string(readings.settings_writes_pending));
+    addValue(&motion, "settings_acks", std::to_string(state.settings_acks));
+    addValue(&motion, "settings_ack_timeouts", std::to_string(state.settings_ack_timeouts));
     statuses.push_back(motion);
   }
 

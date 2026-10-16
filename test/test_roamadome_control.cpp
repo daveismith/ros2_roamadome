@@ -172,6 +172,13 @@ protected:
   double positionStateForTest() const {return controller_->position_;}
   double velocityStateForTest() const {return controller_->velocity_;}
 
+  uint32_t settingsWritesPendingForTest() const
+  {
+    std::lock_guard<std::mutex> lock(controller_->sendQueue_mutex_);
+    return controller_->settingsWritesPendingLocked();
+  }
+  void setAckTimeoutMsForTest(uint32_t ms) {controller_->sendQueueAckTimeoutMs_ = ms;}
+
   DomeDiagnosticsState diagnosticsStateForTest() const
   {
     std::lock_guard<std::mutex> lock(controller_->diagnostics_mutex_);
@@ -1937,9 +1944,14 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_MaxSpeedWrite_SendsCommandAndUpdatedTr
   const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
   ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
   ASSERT_TRUE(firmware.waitFor("#DPMAXSPEED60", 500));
+  EXPECT_EQ(settingsWritesPendingForTest(), 1u);
+  EXPECT_EQ(diagnosticsStateForTest().settings_acks, 0u);
 
   pty.writeText("Restore Dome Settings\nWrite Settings\nUpdated\n");
   ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+  EXPECT_EQ(settingsWritesPendingForTest(), 0u);
+  EXPECT_EQ(diagnosticsStateForTest().settings_acks, 1u);
+  EXPECT_EQ(diagnosticsStateForTest().settings_ack_timeouts, 0u);
   ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
   EXPECT_TRUE(firmware.waitFor("#DPCONFIG", 500));
 }
@@ -1981,6 +1993,8 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_UnchangedReply_CompletesAckWithoutConf
 
   // Completed immediately by the reply, long before the 3 s ack timeout.
   EXPECT_FALSE(sendQueueCommandActiveForTest());
+  EXPECT_EQ(diagnosticsStateForTest().settings_acks, 1u);
+  EXPECT_EQ(settingsWritesPendingForTest(), 0u);
 
   ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
   std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -2024,12 +2038,66 @@ TEST_F(RoamadomeControlTest, RuntimeQueue_UnchangedWhileWaitingForUpdated_IsIgno
   pty.writeText("Write Settings\nUnchanged\n");
   ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
   EXPECT_TRUE(sendQueueCommandActiveForTest());
+  EXPECT_EQ(diagnosticsStateForTest().settings_acks, 0u);
+  EXPECT_EQ(settingsWritesPendingForTest(), 1u);
 
   pty.writeText("Updated\n");
   ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
   EXPECT_FALSE(sendQueueCommandActiveForTest());
+  EXPECT_EQ(diagnosticsStateForTest().settings_acks, 1u);
   ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
   EXPECT_TRUE(firmware.waitFor("#DPCONFIG", 500));
+}
+
+TEST_F(RoamadomeControlTest, RuntimeQueue_SettingsPendingAndAckTimeoutCounters)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  AckFirmware firmware(&pty);
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+  setLifecycleActiveForTest(true);
+  firmware.clear();
+  setAckTimeoutMsForTest(50);
+
+  // Two queued settings writes count as pending before anything is sent.
+  EXPECT_EQ(settingsWritesPendingForTest(), 0u);
+  queueAckCommandForTest();
+  queueAckCommandForTest();
+  EXPECT_EQ(settingsWritesPendingForTest(), 2u);
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor("#DPMAXSPEED60", 500));
+  EXPECT_EQ(settingsWritesPendingForTest(), 2u);  // one active, one queued
+
+  // No reply: the active write times out and is counted, not acked.
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  EXPECT_EQ(diagnosticsStateForTest().settings_ack_timeouts, 1u);
+  EXPECT_EQ(diagnosticsStateForTest().settings_acks, 0u);
+  EXPECT_EQ(settingsWritesPendingForTest(), 1u);  // the second one is now active
+
+  pty.writeText("Unchanged\n");
+  ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+  EXPECT_EQ(diagnosticsStateForTest().settings_acks, 1u);
+  EXPECT_EQ(diagnosticsStateForTest().settings_ack_timeouts, 1u);
+  EXPECT_EQ(settingsWritesPendingForTest(), 0u);
 }
 
 TEST_F(RoamadomeControlTest, SetHomeHere_RejectedWhenInactiveOrPortClosed)
