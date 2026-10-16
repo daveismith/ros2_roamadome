@@ -1,0 +1,1090 @@
+{
+  "sweep": "sensor",
+  "run_id": "20261015-203716-sensor",
+  "status": "complete",
+  "partial": false,
+  "reason": null,
+  "config": {
+    "percents": [
+      20,
+      35,
+      50,
+      75,
+      100
+    ],
+    "raw_motor": true,
+    "heartbeat_period_s": 0.5,
+    "velocity_window_s": 0.5,
+    "stall_deg_s": 3.0,
+    "stall_s": 2.0,
+    "max_plausible_deg_s": 579.6653479352252,
+    "max_plausible_source": "1.5 x measured maximum in /home/pi/dome_bench/phase6-dome-2/20261015-203255-speed/speed_sweep.json",
+    "same_cycle_dt_s": 0.005,
+    "settle_s": 2.0,
+    "duration_s": 30.0,
+    "min_percent_known": {
+      "positive_percent": 27,
+      "negative_percent": 25
+    },
+    "min_percent_source": "/home/pi/dome_bench/phase6-dome-2/20261015-203255-speed/speed_sweep.json"
+  },
+  "angle_sign_for_positive_percent": -1,
+  "angle_sign_consistent": true,
+  "angle_sign_votes": {
+    "positive": 0,
+    "negative": 10
+  },
+  "steps": [
+    {
+      "index": 0,
+      "kind": "step",
+      "percent": 20,
+      "direction": 1,
+      "samples": 274,
+      "measure_samples": 209,
+      "stalled": true,
+      "stall_after_s": 8.666704893112183,
+      "end_reason": "stalled",
+      "jump_count": 4,
+      "same_cycle_pairs": 21,
+      "max_gap_s": 0.06669998168945312,
+      "step_displacement_deg": -194.0,
+      "measure_s": 6.633378505706787,
+      "displacement_deg": -160.0,
+      "revolutions": 0.4444444444444444,
+      "velocity_rad_s": -0.4832799333562768,
+      "mean_velocity_rad_s": -0.41036658220009553,
+      "std_velocity_rad_s": 0.29743124503065366,
+      "speed_rad_s": 0.4832799333562768,
+      "moving": false,
+      "jumps": [
+        {
+          "t_host": 1792111038.025166,
+          "start_deg": 202,
+          "delta_deg": 82,
+          "dt_s": 0.06660652160644531,
+          "commanded_percent": 20
+        },
+        {
+          "t_host": 1792111038.0917726,
+          "start_deg": 284,
+          "delta_deg": -84,
+          "dt_s": 0.03332638740539551,
+          "commanded_percent": 20
+        },
+        {
+          "t_host": 1792111038.125099,
+          "start_deg": 200,
+          "delta_deg": 171,
+          "dt_s": 0.03334665298461914,
+          "commanded_percent": 20
+        },
+        {
+          "t_host": 1792111038.2251308,
+          "start_deg": 12,
+          "delta_deg": -174,
+          "dt_s": 0.06666707992553711,
+          "commanded_percent": 20
+        }
+      ],
+      "reversal_count": 0,
+      "backward_pairs": 0,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": false
+    },
+    {
+      "index": 1,
+      "kind": "step",
+      "percent": -20,
+      "direction": -1,
+      "samples": 190,
+      "measure_samples": 128,
+      "stalled": true,
+      "stall_after_s": 5.866633176803589,
+      "end_reason": "stalled",
+      "jump_count": 0,
+      "same_cycle_pairs": 18,
+      "max_gap_s": 0.06670093536376953,
+      "step_displacement_deg": 91.0,
+      "measure_s": 3.9000208377838135,
+      "displacement_deg": 46.0,
+      "revolutions": 0.12777777777777777,
+      "velocity_rad_s": 0.1859056131843112,
+      "mean_velocity_rad_s": 0.23660926445303407,
+      "std_velocity_rad_s": 0.19643146604701,
+      "speed_rad_s": 0.1859056131843112,
+      "moving": false,
+      "jumps": [],
+      "reversal_count": 0,
+      "backward_pairs": 0,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": false
+    },
+    {
+      "index": 2,
+      "kind": "step",
+      "percent": 35,
+      "direction": 1,
+      "samples": 984,
+      "measure_samples": 921,
+      "stalled": false,
+      "stall_after_s": null,
+      "end_reason": "completed",
+      "jump_count": 17,
+      "same_cycle_pairs": 63,
+      "max_gap_s": 0.23329782485961914,
+      "step_displacement_deg": -2588.0,
+      "measure_s": 29.966817140579224,
+      "displacement_deg": -2448.0,
+      "revolutions": 6.8,
+      "velocity_rad_s": -1.4351503034818633,
+      "mean_velocity_rad_s": -1.424734416950543,
+      "std_velocity_rad_s": 0.5263206045952968,
+      "speed_rad_s": 1.4351503034818633,
+      "moving": true,
+      "jumps": [
+        {
+          "t_host": 1792111055.6251256,
+          "start_deg": 239,
+          "delta_deg": 37,
+          "dt_s": 0.03333425521850586,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111055.725139,
+          "start_deg": 274,
+          "delta_deg": -39,
+          "dt_s": 0.03333449363708496,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111060.1251013,
+          "start_deg": 239,
+          "delta_deg": 37,
+          "dt_s": 0.033345699310302734,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111060.1917806,
+          "start_deg": 274,
+          "delta_deg": -37,
+          "dt_s": 0.03332710266113281,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111060.6585014,
+          "start_deg": 206,
+          "delta_deg": 167,
+          "dt_s": 0.06662201881408691,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111060.7251234,
+          "start_deg": 13,
+          "delta_deg": -177,
+          "dt_s": 0.03333592414855957,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111064.4917722,
+          "start_deg": 274,
+          "delta_deg": -38,
+          "dt_s": 0.03333592414855957,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111068.7917879,
+          "start_deg": 239,
+          "delta_deg": 37,
+          "dt_s": 0.033323049545288086,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111069.4251065,
+          "start_deg": 13,
+          "delta_deg": -177,
+          "dt_s": 0.033353567123413086,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111073.2251215,
+          "start_deg": 239,
+          "delta_deg": 36,
+          "dt_s": 0.03331732749938965,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111073.2917824,
+          "start_deg": 274,
+          "delta_deg": -39,
+          "dt_s": 0.033360958099365234,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111073.7584794,
+          "start_deg": 206,
+          "delta_deg": 167,
+          "dt_s": 0.06664037704467773,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111073.8251197,
+          "start_deg": 13,
+          "delta_deg": -176,
+          "dt_s": 0.03333759307861328,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111077.558451,
+          "start_deg": 239,
+          "delta_deg": 35,
+          "dt_s": 0.033316850662231445,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111077.5917678,
+          "start_deg": 274,
+          "delta_deg": -39,
+          "dt_s": 0.033333539962768555,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111078.0917752,
+          "start_deg": 205,
+          "delta_deg": 168,
+          "dt_s": 0.033333778381347656,
+          "commanded_percent": 35
+        },
+        {
+          "t_host": 1792111078.125109,
+          "start_deg": 13,
+          "delta_deg": -177,
+          "dt_s": 0.03333616256713867,
+          "commanded_percent": 35
+        }
+      ],
+      "reversal_count": 1,
+      "backward_pairs": 4,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": true
+    },
+    {
+      "index": 3,
+      "kind": "step",
+      "percent": -35,
+      "direction": -1,
+      "samples": 666,
+      "measure_samples": 603,
+      "stalled": true,
+      "stall_after_s": 21.499992847442627,
+      "end_reason": "stalled",
+      "jump_count": 16,
+      "same_cycle_pairs": 34,
+      "max_gap_s": 0.06667160987854004,
+      "step_displacement_deg": 1820.0,
+      "measure_s": 19.500030755996704,
+      "displacement_deg": 1695.0,
+      "revolutions": 4.708333333333333,
+      "velocity_rad_s": 1.5110169174488295,
+      "mean_velocity_rad_s": 1.5058976385577545,
+      "std_velocity_rad_s": 0.654439277706589,
+      "speed_rad_s": 1.5110169174488295,
+      "moving": false,
+      "jumps": [
+        {
+          "t_host": 1792111088.325173,
+          "start_deg": 193,
+          "delta_deg": 179,
+          "dt_s": 0.03333759307861328,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111088.3585105,
+          "start_deg": 12,
+          "delta_deg": -172,
+          "dt_s": 0.033338308334350586,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111088.8918731,
+          "start_deg": 236,
+          "delta_deg": 176,
+          "dt_s": 0.03330636024475098,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111088.9251795,
+          "start_deg": 52,
+          "delta_deg": -172,
+          "dt_s": 0.033349037170410156,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111092.4251685,
+          "start_deg": 197,
+          "delta_deg": 176,
+          "dt_s": 0.033324480056762695,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111092.458493,
+          "start_deg": 13,
+          "delta_deg": -172,
+          "dt_s": 0.03329968452453613,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111092.991778,
+          "start_deg": 237,
+          "delta_deg": 175,
+          "dt_s": 0.03333306312561035,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111093.025111,
+          "start_deg": 52,
+          "delta_deg": -173,
+          "dt_s": 0.03334784507751465,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111097.1251218,
+          "start_deg": 237,
+          "delta_deg": 175,
+          "dt_s": 0.033332109451293945,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111097.158454,
+          "start_deg": 52,
+          "delta_deg": -172,
+          "dt_s": 0.033324241638183594,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111100.7251287,
+          "start_deg": 193,
+          "delta_deg": 179,
+          "dt_s": 0.033341169357299805,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111100.7584698,
+          "start_deg": 12,
+          "delta_deg": -172,
+          "dt_s": 0.03331732749938965,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111101.358463,
+          "start_deg": 237,
+          "delta_deg": 175,
+          "dt_s": 0.03332328796386719,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111101.3917863,
+          "start_deg": 52,
+          "delta_deg": -172,
+          "dt_s": 0.03333592414855957,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111104.8917904,
+          "start_deg": 193,
+          "delta_deg": 179,
+          "dt_s": 0.03333306312561035,
+          "commanded_percent": -35
+        },
+        {
+          "t_host": 1792111104.9251235,
+          "start_deg": 12,
+          "delta_deg": -172,
+          "dt_s": 0.03334999084472656,
+          "commanded_percent": -35
+        }
+      ],
+      "reversal_count": 0,
+      "backward_pairs": 0,
+      "stall_count": 1,
+      "scored_reversals_and_stalls": true
+    },
+    {
+      "index": 4,
+      "kind": "step",
+      "percent": 50,
+      "direction": 1,
+      "samples": 996,
+      "measure_samples": 932,
+      "stalled": false,
+      "stall_after_s": null,
+      "end_reason": "completed",
+      "jump_count": 30,
+      "same_cycle_pairs": 59,
+      "max_gap_s": 0.23334455490112305,
+      "step_displacement_deg": -5120.0,
+      "measure_s": 29.966695308685303,
+      "displacement_deg": -4897.0,
+      "revolutions": 13.602777777777778,
+      "velocity_rad_s": -2.8638524084662587,
+      "mean_velocity_rad_s": -2.859729570755707,
+      "std_velocity_rad_s": 0.5631663041947914,
+      "speed_rad_s": 2.8638524084662587,
+      "moving": true,
+      "jumps": [
+        {
+          "t_host": 1792111109.8250997,
+          "start_deg": 207,
+          "delta_deg": 166,
+          "dt_s": 0.0333404541015625,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111109.8584402,
+          "start_deg": 13,
+          "delta_deg": -176,
+          "dt_s": 0.0333399772644043,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111113.8917844,
+          "start_deg": 287,
+          "delta_deg": 29,
+          "dt_s": 0.03332161903381348,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111113.925106,
+          "start_deg": 316,
+          "delta_deg": -39,
+          "dt_s": 0.03335094451904297,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111114.4584367,
+          "start_deg": 200,
+          "delta_deg": 173,
+          "dt_s": 0.033319711685180664,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111114.4917564,
+          "start_deg": 13,
+          "delta_deg": -179,
+          "dt_s": 0.0333402156829834,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111116.0917645,
+          "start_deg": 286,
+          "delta_deg": 30,
+          "dt_s": 0.0333247184753418,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111116.1250892,
+          "start_deg": 316,
+          "delta_deg": -40,
+          "dt_s": 0.03335142135620117,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111118.7917833,
+          "start_deg": 207,
+          "delta_deg": 166,
+          "dt_s": 0.03333115577697754,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111118.8251145,
+          "start_deg": 13,
+          "delta_deg": -176,
+          "dt_s": 0.033327579498291016,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111120.958471,
+          "start_deg": 208,
+          "delta_deg": 165,
+          "dt_s": 0.03331494331359863,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111120.991786,
+          "start_deg": 13,
+          "delta_deg": -176,
+          "dt_s": 0.03332972526550293,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111122.6250892,
+          "start_deg": 286,
+          "delta_deg": 30,
+          "dt_s": 0.033362627029418945,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111122.6584518,
+          "start_deg": 316,
+          "delta_deg": -41,
+          "dt_s": 0.0333402156829834,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111129.7251089,
+          "start_deg": 207,
+          "delta_deg": 166,
+          "dt_s": 0.033335208892822266,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111129.758444,
+          "start_deg": 13,
+          "delta_deg": -177,
+          "dt_s": 0.03334808349609375,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111131.6584547,
+          "start_deg": 243,
+          "delta_deg": 31,
+          "dt_s": 0.03332877159118652,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111131.6917834,
+          "start_deg": 274,
+          "delta_deg": -42,
+          "dt_s": 0.03332853317260742,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111131.9251194,
+          "start_deg": 207,
+          "delta_deg": 166,
+          "dt_s": 0.033353567123413086,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111131.958473,
+          "start_deg": 13,
+          "delta_deg": -178,
+          "dt_s": 0.03332400321960449,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111133.8917842,
+          "start_deg": 245,
+          "delta_deg": 29,
+          "dt_s": 0.0333251953125,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111133.9251094,
+          "start_deg": 274,
+          "delta_deg": -39,
+          "dt_s": 0.03335118293762207,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111135.825105,
+          "start_deg": 287,
+          "delta_deg": 29,
+          "dt_s": 0.033347129821777344,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111135.858452,
+          "start_deg": 316,
+          "delta_deg": -40,
+          "dt_s": 0.033342838287353516,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111136.1251152,
+          "start_deg": 239,
+          "delta_deg": 114,
+          "dt_s": 0.033342599868774414,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111136.1584578,
+          "start_deg": 353,
+          "delta_deg": -122,
+          "dt_s": 0.03332710266113281,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111136.3250985,
+          "start_deg": 207,
+          "delta_deg": 166,
+          "dt_s": 0.06668972969055176,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111136.3917882,
+          "start_deg": 13,
+          "delta_deg": -178,
+          "dt_s": 0.03333139419555664,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111138.2917771,
+          "start_deg": 239,
+          "delta_deg": 35,
+          "dt_s": 0.03333926200866699,
+          "commanded_percent": 50
+        },
+        {
+          "t_host": 1792111138.3251164,
+          "start_deg": 274,
+          "delta_deg": -39,
+          "dt_s": 0.03333902359008789,
+          "commanded_percent": 50
+        }
+      ],
+      "reversal_count": 0,
+      "backward_pairs": 0,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": true
+    },
+    {
+      "index": 5,
+      "kind": "step",
+      "percent": -50,
+      "direction": -1,
+      "samples": 1000,
+      "measure_samples": 937,
+      "stalled": false,
+      "stall_after_s": null,
+      "end_reason": "completed",
+      "jump_count": 28,
+      "same_cycle_pairs": 50,
+      "max_gap_s": 0.06669402122497559,
+      "step_displacement_deg": 2525.0,
+      "measure_s": 30.000030279159546,
+      "displacement_deg": 2289.0,
+      "revolutions": 6.358333333333333,
+      "velocity_rad_s": 1.3522242382569,
+      "mean_velocity_rad_s": 1.3912721782580733,
+      "std_velocity_rad_s": 4.262391770441862,
+      "speed_rad_s": 1.3522242382569,
+      "moving": true,
+      "jumps": [
+        {
+          "t_host": 1792111143.4584534,
+          "start_deg": 193,
+          "delta_deg": -161,
+          "dt_s": 0.033359527587890625,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111143.491813,
+          "start_deg": 32,
+          "delta_deg": 169,
+          "dt_s": 0.033333539962768555,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111145.6918125,
+          "start_deg": 13,
+          "delta_deg": -173,
+          "dt_s": 0.06665205955505371,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111145.9584765,
+          "start_deg": 233,
+          "delta_deg": 179,
+          "dt_s": 0.03330278396606445,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111145.9917793,
+          "start_deg": 52,
+          "delta_deg": -171,
+          "dt_s": 0.03334212303161621,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111152.3584688,
+          "start_deg": 193,
+          "delta_deg": -180,
+          "dt_s": 0.03332638740539551,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111152.3917952,
+          "start_deg": 13,
+          "delta_deg": -171,
+          "dt_s": 0.033325910568237305,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111152.6250982,
+          "start_deg": 233,
+          "delta_deg": 179,
+          "dt_s": 0.033356666564941406,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111152.658455,
+          "start_deg": 52,
+          "delta_deg": -172,
+          "dt_s": 0.03335285186767578,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111154.891783,
+          "start_deg": 236,
+          "delta_deg": 176,
+          "dt_s": 0.03331875801086426,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111154.9251018,
+          "start_deg": 52,
+          "delta_deg": -171,
+          "dt_s": 0.033364295959472656,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111157.1251144,
+          "start_deg": 230,
+          "delta_deg": -178,
+          "dt_s": 0.03335452079772949,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111157.158469,
+          "start_deg": 52,
+          "delta_deg": -171,
+          "dt_s": 0.033326148986816406,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111159.0918155,
+          "start_deg": 196,
+          "delta_deg": 177,
+          "dt_s": 0.03328680992126465,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111159.1251023,
+          "start_deg": 13,
+          "delta_deg": -171,
+          "dt_s": 0.06669402122497559,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111159.358469,
+          "start_deg": 234,
+          "delta_deg": 178,
+          "dt_s": 0.033329010009765625,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111159.391798,
+          "start_deg": 52,
+          "delta_deg": -171,
+          "dt_s": 0.033319950103759766,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111161.3584862,
+          "start_deg": 191,
+          "delta_deg": -178,
+          "dt_s": 0.033324241638183594,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111161.3918104,
+          "start_deg": 13,
+          "delta_deg": -172,
+          "dt_s": 0.03331875801086426,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111161.6584594,
+          "start_deg": 236,
+          "delta_deg": 176,
+          "dt_s": 0.033322811126708984,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111161.6917822,
+          "start_deg": 52,
+          "delta_deg": -171,
+          "dt_s": 0.03332829475402832,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111163.625122,
+          "start_deg": 193,
+          "delta_deg": -180,
+          "dt_s": 0.03334522247314453,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111163.6584673,
+          "start_deg": 13,
+          "delta_deg": -172,
+          "dt_s": 0.033308982849121094,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111168.1251059,
+          "start_deg": 191,
+          "delta_deg": -178,
+          "dt_s": 0.03333330154418945,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111168.1584392,
+          "start_deg": 13,
+          "delta_deg": -173,
+          "dt_s": 0.03334403038024902,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111172.6251175,
+          "start_deg": 192,
+          "delta_deg": -179,
+          "dt_s": 0.03334379196166992,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111172.8917968,
+          "start_deg": 234,
+          "delta_deg": 178,
+          "dt_s": 0.03332662582397461,
+          "commanded_percent": -50
+        },
+        {
+          "t_host": 1792111172.9251235,
+          "start_deg": 52,
+          "delta_deg": -170,
+          "dt_s": 0.033342838287353516,
+          "commanded_percent": -50
+        }
+      ],
+      "reversal_count": 0,
+      "backward_pairs": 2,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": true
+    },
+    {
+      "index": 6,
+      "kind": "step",
+      "percent": 75,
+      "direction": 1,
+      "samples": 979,
+      "measure_samples": 917,
+      "stalled": false,
+      "stall_after_s": null,
+      "end_reason": "completed",
+      "jump_count": 2,
+      "same_cycle_pairs": 34,
+      "max_gap_s": 0.23330473899841309,
+      "step_displacement_deg": -8569.0,
+      "measure_s": 29.99991464614868,
+      "displacement_deg": -8199.0,
+      "revolutions": 22.775,
+      "velocity_rad_s": -4.773019659216455,
+      "mean_velocity_rad_s": -4.769457660698389,
+      "std_velocity_rad_s": 0.3313216108950927,
+      "speed_rad_s": 4.773019659216455,
+      "moving": true,
+      "jumps": [
+        {
+          "t_host": 1792111175.1251707,
+          "start_deg": 246,
+          "delta_deg": 28,
+          "dt_s": 0.033353328704833984,
+          "commanded_percent": 75
+        },
+        {
+          "t_host": 1792111175.158524,
+          "start_deg": 274,
+          "delta_deg": -42,
+          "dt_s": 0.033329010009765625,
+          "commanded_percent": 75
+        }
+      ],
+      "reversal_count": 0,
+      "backward_pairs": 1,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": true
+    },
+    {
+      "index": 7,
+      "kind": "step",
+      "percent": -75,
+      "direction": -1,
+      "samples": 983,
+      "measure_samples": 920,
+      "stalled": false,
+      "stall_after_s": null,
+      "end_reason": "completed",
+      "jump_count": 0,
+      "same_cycle_pairs": 34,
+      "max_gap_s": 0.06667327880859375,
+      "step_displacement_deg": 8633.0,
+      "measure_s": 29.966674089431763,
+      "displacement_deg": 8236.0,
+      "revolutions": 22.877777777777776,
+      "velocity_rad_s": 4.8028693866109995,
+      "mean_velocity_rad_s": 4.795680269772676,
+      "std_velocity_rad_s": 0.14650180215751912,
+      "speed_rad_s": 4.8028693866109995,
+      "moving": true,
+      "jumps": [],
+      "reversal_count": 0,
+      "backward_pairs": 0,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": true
+    },
+    {
+      "index": 8,
+      "kind": "step",
+      "percent": 100,
+      "direction": 1,
+      "samples": 963,
+      "measure_samples": 901,
+      "stalled": false,
+      "stall_after_s": null,
+      "end_reason": "completed",
+      "jump_count": 5,
+      "same_cycle_pairs": 17,
+      "max_gap_s": 0.2333354949951172,
+      "step_displacement_deg": -12099.0,
+      "measure_s": 29.99995708465576,
+      "displacement_deg": -11582.0,
+      "revolutions": 32.172222222222224,
+      "velocity_rad_s": -6.743371619755143,
+      "mean_velocity_rad_s": -6.731626903462404,
+      "std_velocity_rad_s": 0.4256567153213131,
+      "speed_rad_s": 6.743371619755143,
+      "moving": true,
+      "jumps": [
+        {
+          "t_host": 1792111252.325117,
+          "start_deg": 252,
+          "delta_deg": 22,
+          "dt_s": 0.03333640098571777,
+          "commanded_percent": 100
+        },
+        {
+          "t_host": 1792111252.3584535,
+          "start_deg": 274,
+          "delta_deg": -46,
+          "dt_s": 0.03334975242614746,
+          "commanded_percent": 100
+        },
+        {
+          "t_host": 1792111254.2251253,
+          "start_deg": 274,
+          "delta_deg": -47,
+          "dt_s": 0.0333404541015625,
+          "commanded_percent": 100
+        },
+        {
+          "t_host": 1792111265.3584344,
+          "start_deg": 252,
+          "delta_deg": 22,
+          "dt_s": 0.03335690498352051,
+          "commanded_percent": 100
+        },
+        {
+          "t_host": 1792111265.3917913,
+          "start_deg": 274,
+          "delta_deg": -48,
+          "dt_s": 0.033315420150756836,
+          "commanded_percent": 100
+        }
+      ],
+      "reversal_count": 0,
+      "backward_pairs": 1,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": true
+    },
+    {
+      "index": 9,
+      "kind": "step",
+      "percent": -100,
+      "direction": -1,
+      "samples": 964,
+      "measure_samples": 902,
+      "stalled": false,
+      "stall_after_s": null,
+      "end_reason": "completed",
+      "jump_count": 0,
+      "same_cycle_pairs": 29,
+      "max_gap_s": 0.06674695014953613,
+      "step_displacement_deg": 11822.0,
+      "measure_s": 29.999992609024048,
+      "displacement_deg": 11306.0,
+      "revolutions": 31.405555555555555,
+      "velocity_rad_s": 6.591595650870711,
+      "mean_velocity_rad_s": 6.5795822661084875,
+      "std_velocity_rad_s": 0.2765347240962129,
+      "speed_rad_s": 6.591595650870711,
+      "moving": true,
+      "jumps": [],
+      "reversal_count": 0,
+      "backward_pairs": 0,
+      "stall_count": 0,
+      "scored_reversals_and_stalls": true
+    }
+  ],
+  "jump_start_histogram": {
+    "bin_deg": 10,
+    "counts": [
+      0,
+      22,
+      0,
+      1,
+      0,
+      11,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      11,
+      12,
+      0,
+      0,
+      18,
+      3,
+      2,
+      0,
+      12,
+      5,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      1
+    ]
+  },
+  "totals": {
+    "samples": 7999,
+    "jumps": 102,
+    "reversals": 1,
+    "stalls": 1,
+    "same_cycle_pairs": 359,
+    "max_gap_s": 0.23334455490112305
+  },
+  "suggested_pass": false
+}

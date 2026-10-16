@@ -312,6 +312,15 @@ sweep did **not** pass with the dome. Position spikes appeared at fixed angles (
 reading ~275 deg, and later true ~200 deg reading ~13 deg), which need the mechanical check in (b)
 and a sensor sweep re-run.
 
+A repeatability run after the dome was re-seated
+([docs/bench_results/2026-10-15-with-dome-reseated.md](docs/bench_results/2026-10-15-with-dome-reseated.md))
+failed the sensor sweep again, and worse: 102 jumps against 6. Decoded against the sensor ring's
+code table, every spike on both days is a single bit reading set where it should be clear. The
+bit 0 (`SENSORS[0]`) fault came back at the same true angles (198-201 and 232-238 deg), and a new
+bit 1 fault appeared at 239 and 277 deg. The fault follows the dome angle and survives re-seating,
+so it is not a one-off. Fix the sensor ring mechanics (gap and alignment of those sensors at those
+angles) before trusting the dome position. The speed values above were confirmed within 2-4 %.
+
 **(a) Prerequisites and safety.**
 
 - A human at the robot for the whole session, the dome clear of cables, tools and hands. A
