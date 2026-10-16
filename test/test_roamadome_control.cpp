@@ -170,6 +170,18 @@ protected:
   }
 
   double positionStateForTest() const {return controller_->position_;}
+  void requestConfigRefreshForTest(const std::string & reason)
+  {
+    controller_->requestConfigRefresh(reason);
+  }
+  void setConfigRefreshSettleMsForTest(uint32_t ms) {controller_->configRefreshSettleMs_ = ms;}
+  bool configRefreshPendingForTest() const
+  {
+    std::lock_guard<std::mutex> lock(controller_->sendQueue_mutex_);
+    return controller_->configRefreshPending_;
+  }
+  bool serialBaudSweepForTest() const {return controller_->serialBaudSweep_;}
+  uint32_t configRefreshIntervalMsForTest() const {return controller_->configRefreshIntervalMs_;}
   double velocityStateForTest() const {return controller_->velocity_;}
 
   uint32_t settingsWritesPendingForTest() const
@@ -2711,6 +2723,132 @@ TEST_F(BenchModeTest, Deactivate_ClearsBenchState)
   EXPECT_TRUE(firmware.waitFor(":DPR0", 1000));
   EXPECT_FALSE(benchStateForTest().active);
   EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_IDLE);
+}
+
+
+/**
+ * ============================================================================
+ * SERIAL LINK PARAMETERS AND DEFERRED CONFIG REFRESH
+ * ============================================================================
+ */
+
+TEST_F(RoamadomeControlTest, ParameterParsing_SerialBaudSweepAndRefreshInterval)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_FALSE(serialBaudSweepForTest());
+  EXPECT_EQ(configRefreshIntervalMsForTest(), 60000u);
+
+  auto controller2 = std::make_unique<RoamadomeControl>();
+  info.hardware_parameters["serial_baud_sweep"] = "true";
+  info.hardware_parameters["config_refresh_interval_ms"] = "0";
+  params.hardware_info = info;
+  controller_ = std::move(controller2);
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_TRUE(serialBaudSweepForTest());
+  EXPECT_EQ(configRefreshIntervalMsForTest(), 0u);
+
+  auto controller3 = std::make_unique<RoamadomeControl>();
+  info.hardware_parameters["serial_baud_sweep"] = "maybe";
+  params.hardware_info = info;
+  controller_ = std::move(controller3);
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, Configure_SendsBaudSweepOnlyWhenEnabled)
+{
+  for (const bool sweep : {false, true}) {
+    PseudoTerminal pty;
+    ASSERT_TRUE(pty.valid());
+
+    hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+    info.hardware_parameters["serial_port"] = pty.slavePath();
+    info.hardware_parameters["startup_default_timeout_ms"] = "200";
+    info.hardware_parameters["startup_report_timeout_ms"] = "200";
+    info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+    info.hardware_parameters["startup_retries"] = "1";
+    info.hardware_parameters["serial_baud_sweep"] = sweep ? "true" : "false";
+
+    hardware_interface::HardwareComponentInterfaceParams params;
+    params.hardware_info = info;
+    controller_ = std::make_unique<RoamadomeControl>();
+    ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+    AckFirmware firmware(&pty);
+    rclcpp_lifecycle::State previous_state(
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+    ASSERT_EQ(
+      controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+
+    if (sweep) {
+      EXPECT_GE(firmware.count("#DPSERIALBAUD115200"), 1) << "sweep enabled";
+    } else {
+      EXPECT_EQ(firmware.count("#DPSERIALBAUD115200"), 0) << "sweep disabled";
+    }
+    EXPECT_GE(firmware.count("#DPCONFIG"), 1);
+  }
+}
+
+TEST_F(RoamadomeControlTest, ConfigRefresh_DeferredWhileRotatingThenSentAfterSettle)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  AckFirmware firmware(&pty);
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+  setLifecycleActiveForTest(true);
+  setConfigRefreshSettleMsForTest(60);
+  firmware.clear();
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.02);
+
+  // Rotating: the refresh must be deferred, not queued.
+  ASSERT_TRUE(sendVelocityCommandForTest(40));
+  requestConfigRefreshForTest("periodic refresh");
+  EXPECT_TRUE(configRefreshPendingForTest());
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(firmware.count("#DPCONFIG"), 0);
+  EXPECT_TRUE(configRefreshPendingForTest());
+
+  // Stopped: nothing is sent until the dome has been still for the settle time.
+  ASSERT_TRUE(sendStopCommandForTest());
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(firmware.count("#DPCONFIG"), 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor("#DPCONFIG", 500));
+  EXPECT_FALSE(configRefreshPendingForTest());
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor("#DPINVALID", 500));
+
+  // Not rotating: a request is queued straight away.
+  firmware.clear();
+  requestConfigRefreshForTest("periodic refresh");
+  EXPECT_FALSE(configRefreshPendingForTest());
+  ASSERT_EQ(controller_->write(now, period), hardware_interface::return_type::OK);
+  ASSERT_TRUE(firmware.waitFor("#DPCONFIG", 500));
 }
 
 }  // namespace ros2_roamadome

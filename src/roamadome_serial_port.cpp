@@ -204,27 +204,44 @@ bool RoamadomeSerialPort::read()
     return false;
   }
 
-  char buffer[100] = {0};
-  ssize_t n = ::read(serialFd_, buffer, sizeof(buffer) - 1);
-
-  if (n < 0) {
-    // In non-blocking mode, EAGAIN/EWOULDBLOCK means no data available (not an error)
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      flushActiveSectionIfReady(false);
-      return true;
+  // Drain everything the port has for us this cycle. The controller is a USB
+  // CDC link that delivers a whole #DPCONFIG dump (about 700 bytes) in a few
+  // milliseconds; reading one small chunk per cycle used to leave position
+  // reports queued behind it for several cycles, which showed up as a 230 ms
+  // hole in the telemetry every config refresh. Chunks are read until the port
+  // runs dry or a per-call cap is hit.
+  constexpr size_t kChunkBytes = 1024;
+  constexpr size_t kMaxBytesPerCall = 16384;
+  char buffer[kChunkBytes];
+  size_t total = 0;
+  while (total < kMaxBytesPerCall) {
+    const ssize_t n = ::read(serialFd_, buffer, sizeof(buffer));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      // In non-blocking mode, EAGAIN/EWOULDBLOCK means no data available (not an error)
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      }
+      std::cerr << "Error reading from serial port: " << strerror(errno) << std::endl;
+      return false;
     }
-    std::cerr << "Error reading from serial port: " << strerror(errno) << std::endl;
-    return false;
+    if (n == 0) {
+      break;
+    }
+    lineBuffer_.append(buffer, static_cast<size_t>(n));
+    total += static_cast<size_t>(n);
+    if (static_cast<size_t>(n) < sizeof(buffer)) {
+      break;  // the port is drained
+    }
   }
 
-  if (n == 0) {
+  if (0 == total) {
     // No new data available: flush pending section only if idle timeout has elapsed.
     flushActiveSectionIfReady(false);
     return true;
   }
-
-  // Append new data to buffer
-  lineBuffer_.append(buffer, n);
 
   // Check for buffer overflow
   if (lineBuffer_.size() > 10000) {

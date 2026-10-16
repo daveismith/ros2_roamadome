@@ -108,6 +108,10 @@ controller manager cycle (33 ms at 30 Hz) and two report lines that arrive in
 the same cycle get stamps only microseconds apart; the regression velocity
 tolerates this, but a per-sample timing analysis should not assume evenly
 spaced samples.
+`read()` drains everything the port holds each cycle (up to 16 KB), so a config
+dump or status poll never delays the position reports queued behind it by more
+than the cycle it arrives in, and the periodic `#DPCONFIG` refresh is deferred
+while the dome is moving (`config_refresh_interval_ms`).
 
 ### Bench mode
 
@@ -673,6 +677,8 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `enable_bench_mode` | bool | `false` | Create the raw drive service `~/bench/drive` (see [Bench mode](#bench-mode)); normally set by the `dome_bench` launch argument |
 | `bench_heartbeat_timeout_ms` | uint32 | `1500` | Send `:DPR0` if no bench drive call arrives within this time while a bench drive is active, must be > 0 |
 | `status_poll_interval_ms` | uint32 | `10000` | Interval for the `#DPSTATUS` poll that feeds `/diagnostics`; `0` disables |
+| `config_refresh_interval_ms` | uint32 | `60000` | Interval for the periodic `#DPCONFIG` refresh that re-syncs `device.*`; deferred while the dome moves; `0` disables |
+| `serial_baud_sweep` | bool | `false` | At startup, try every supported baud and send `#DPSERIALBAUD<serial_baud>` at each. Needed on a UART link whose rate is unknown; pointless on the USB CDC link (ESP32-S3 USB Serial/JTAG), which ignores baud |
 | `auto_mode` | bool | `false` | Enable AutoMode on device during startup |
 | `home_mode` | bool | `false` | Enable HomeMode on device during startup |
 | `startup_log_level` | string | `debug` | Log level for startup transitions (`debug` or `info`) |

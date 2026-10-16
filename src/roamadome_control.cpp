@@ -313,6 +313,24 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   }
   positionTracker_ = PositionTracker(velocityWindowS_);
 
+  if (!parseOptionalBoolParameter(
+      parameters, logger_, "serial_baud_sweep", false, &serialBaudSweep_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "config_refresh_interval_ms",
+      60000,
+      nullptr,
+      "",
+      &configRefreshIntervalMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   if (!parseOptionalUInt32Parameter(
       parameters,
       logger_,
@@ -350,6 +368,9 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
               maxSpeedRadPerSec_, radiansToDegrees(maxSpeedRadPerSec_));
   RCLCPP_INFO(logger_, "Velocity estimate window: %.3f s; telemetry publishing %s",
               velocityWindowS_, publishTelemetry_ ? "enabled" : "disabled");
+  RCLCPP_INFO(logger_, "Serial baud sweep at startup: %s; periodic config refresh: %u ms%s",
+              serialBaudSweep_ ? "enabled" : "disabled (USB CDC link)",
+              configRefreshIntervalMs_, configRefreshIntervalMs_ == 0 ? " (disabled)" : "");
   RCLCPP_INFO(logger_, "Diagnostics status poll interval: %u ms%s",
               statusPollIntervalMs_, statusPollIntervalMs_ == 0 ? " (disabled)" : "");
   RCLCPP_INFO(logger_, "Startup timeouts: default=%u ms setup=%u ms report=%u ms retries=%u",
@@ -415,36 +436,44 @@ bool RoamadomeControl::openDeviceAndRunStartup()
     return false;
   }
 
-  const std::string baud_command = buildCommand("#DPSERIALBAUD", serialBaud_);
-  RCLCPP_INFO(logger_, "Baud Command is %s", baud_command.c_str());
+  if (serialBaudSweep_) {
+    // UART link: the firmware may be at any of its supported rates, so tell it
+    // the wanted rate at each candidate before settling on it. A USB CDC link
+    // ignores baud entirely, so this is off by default (serial_baud_sweep).
+    const std::string baud_command = buildCommand("#DPSERIALBAUD", serialBaud_);
+    RCLCPP_INFO(logger_, "Baud Command is %s", baud_command.c_str());
 
-  // Keep baud sweep separate from startup state machine. It may produce responses,
-  // but no explicit completion check is required for this step.
-  for (size_t idx = 0; idx < sizeof(mSupportedBaudRates) / sizeof(mSupportedBaudRates[0]); idx++) {
-    uint32_t target_baud = mSupportedBaudRates[idx];
+    // Keep baud sweep separate from startup state machine. It may produce responses,
+    // but no explicit completion check is required for this step.
+    const size_t baud_count = sizeof(mSupportedBaudRates) / sizeof(mSupportedBaudRates[0]);
+    for (size_t idx = 0; idx < baud_count; idx++) {
+      uint32_t target_baud = mSupportedBaudRates[idx];
 
-    if (!serialHandler_->configurePort(target_baud)) {
-      RCLCPP_ERROR(logger_, "Failed to configure serial port baud rate: %u", target_baud);
-      serialHandler_->close();
-      serialHandler_.reset();
-      return false;
+      if (!serialHandler_->configurePort(target_baud)) {
+        RCLCPP_ERROR(logger_, "Failed to configure serial port baud rate: %u", target_baud);
+        serialHandler_->close();
+        serialHandler_.reset();
+        return false;
+      }
+
+      for (size_t blankLineIndex = 0; blankLineIndex < 5; blankLineIndex++) {
+        // Send out a blank commond to flush out any partial lines in the buffer and elicit responses from the device at the current baud.
+        serialHandler_->sendCommand("");
+      }
+
+      if (!serialHandler_->sendCommand(baud_command)) {
+        RCLCPP_ERROR(logger_, "Failed to send baud configuration command at baud %u", target_baud);
+        serialHandler_->close();
+        serialHandler_.reset();
+        return false;
+      }
+
+      // Read any opportunistic feedback while sweeping baud rates.
+      serialHandler_->read();
+      std::this_thread::sleep_for(baud_settle_sleep);
     }
-
-    for (size_t blankLineIndex = 0; blankLineIndex < 5; blankLineIndex++) {
-      // Send out a blank commond to flush out any partial lines in the buffer and elicit responses from the device at the current baud.
-      serialHandler_->sendCommand("");
-    }
-
-    if (!serialHandler_->sendCommand(baud_command)) {
-      RCLCPP_ERROR(logger_, "Failed to send baud configuration command at baud %u", target_baud);
-      serialHandler_->close();
-      serialHandler_.reset();
-      return false;
-    }
-
-    // Read any opportunistic feedback while sweeping baud rates.
-    serialHandler_->read();
-    std::this_thread::sleep_for(baud_settle_sleep);
+  } else {
+    RCLCPP_INFO(logger_, "Skipping the serial baud sweep (serial_baud_sweep=false)");
   }
 
   if (!serialHandler_->configurePort(serialBaud_)) {
@@ -952,6 +981,52 @@ bool RoamadomeControl::rotationInProgress(std::string * reason) const
   return false;
 }
 
+bool RoamadomeControl::domeMoving() const
+{
+  std::string reason;
+  if (rotationInProgress(&reason)) {
+    return true;
+  }
+  const double v = velocity_;
+  return !std::isnan(v) && std::fabs(v) > 0.1;
+}
+
+void RoamadomeControl::requestConfigRefresh(const std::string & reason)
+{
+  const bool moving = domeMoving();
+  std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+  if (moving) {
+    if (!configRefreshPending_) {
+      RCLCPP_DEBUG(logger_, "Deferring %s #DPCONFIG until the dome is still", reason.c_str());
+    }
+    configRefreshPending_ = true;
+    configRefreshDeferredSince_ = std::chrono::steady_clock::now();
+    return;
+  }
+  enqueueConfigDumpWithInvalidLocked(reason);
+}
+
+void RoamadomeControl::serviceDeferredConfigRefresh()
+{
+  {
+    std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+    if (!configRefreshPending_) {
+      return;
+    }
+  }
+  const auto now = std::chrono::steady_clock::now();
+  const bool moving = domeMoving();
+  std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+  if (moving) {
+    configRefreshDeferredSince_ = now;
+    return;
+  }
+  if (now - configRefreshDeferredSince_ >= std::chrono::milliseconds(configRefreshSettleMs_)) {
+    enqueueConfigDumpWithInvalidLocked("deferred periodic refresh");
+    configRefreshPending_ = false;
+  }
+}
+
 bool RoamadomeControl::queueSetHomeHere(std::string * message)
 {
   if (!lifecycleActive_.load()) {
@@ -1141,13 +1216,10 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
       benchDriveService_->get_service_name());
   }
 
-  if (!periodicConfigTimer_) {
+  if (!periodicConfigTimer_ && configRefreshIntervalMs_ > 0) {
     periodicConfigTimer_ = node->create_wall_timer(
       std::chrono::milliseconds(configRefreshIntervalMs_),
-      [this]() {
-        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
-        enqueueConfigDumpWithInvalidLocked("periodic refresh");
-      });
+      [this]() {requestConfigRefresh("periodic refresh");});
   }
 
   // The unwrapped angle and sequence counter are "since activation".
@@ -1248,6 +1320,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
     }
     sendQueueCommandActive_ = false;
     sendQueueStage_ = SendQueueStage::IDLE;
+    configRefreshPending_ = false;
   }
 
   if (serialHandler_) {
@@ -1320,6 +1393,8 @@ hardware_interface::return_type RoamadomeControl::write(
     std::lock_guard<std::mutex> lock(bench_mutex_);
     benchBusy = benchActive_;
   }
+
+  serviceDeferredConfigRefresh();
 
   // Process queue bookkeeping under lock.
   {
