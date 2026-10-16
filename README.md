@@ -315,7 +315,7 @@ Worked example: this is exactly the situation on the bench robot.
   ([docs/bench_results/2026-10-16-with-dome-new-plate.md](docs/bench_results/2026-10-16-with-dome-new-plate.md)).
 
 **The 2026-10-16 with-dome report is the calibration reference. These are the values to
-configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 32, SpeedTarget 60, DecelerationScale 250, Fudge 10, Scaling off;
+configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 32, SpeedTarget 60, DecelerationScale 250, Fudge 5, Scaling off;
 `MinSpeed` was raised from 15 to 32 and the position-move settings tuned on 2026-10-16
 after this run, see the report's "MinSpeed follow-up" and "Position-move tuning" sections):
 
@@ -559,10 +559,19 @@ Measured on the assembled dome, new plate, MinSpeed 32:
 | 100 | 150 | 5 | +18, -3, -20 (stalled short), -1, +21, 0 |
 | 45 | 200 | 5 | +10, 0, +12, -1, +7, -1 |
 | 45 | 250 | 8 | +6, -6, 0, -8, +2, -10 |
-| **60** | **250** | **10** | **-2, -5, -2, -1, -5, -2** |
+| 60 | 250 | 10 | -2, -5, -2, -1, -5, -2 |
+| **60** | **250** | **5** | **+2, -6, +2, -5, +3, -5, +2, -4, -3, +2, +4, -4** (12 moves, 20 to 150 deg) |
 
-`SpeedTarget` 60, `DecelerationScale` 250 and `Fudge` 10 are now set (written 2026-10-16
-after the with-dome run) and are part of the calibration state together with MinSpeed 32.
+Fudge versus `MinSpeed` (dome installed, S 60, D 250): the arrival speed at the
+boundary is the floor speed, so a smaller fudge only works with a lower floor, and
+below 30 the approach stalls at the ring's tight spots (MinSpeed 25: within 4 deg
+when it completes, but 2 of 18 moves stalled; 28: within 8, 1 stall in 18; 30:
+within 8, no stalls; 32: within 6 typical, one 12 deg outlier in 18, no stalls).
+Fudge 3 adds about 3 deg of overshoot on short moves, which arrive at 60-75 deg/s
+regardless of the floor. `SpeedTarget` 60, `DecelerationScale` 250 and `Fudge` 5 with
+`MinSpeed` 32 are now set (2026-10-16) and are the calibration state. Getting below
+this needs a shorter stopping distance (a configurable Sabertooth ramp in the
+firmware) or a host-side final nudge, not more fudge tuning.
 Redo this step after any change to the dome's mass or friction, or to `MinSpeed`.
 
 **(f) Until phase 7 lands** the plugin still uses the linear mapping

@@ -697,8 +697,30 @@ stopping-distance range (10 deg) balances the moves. With the 250 degree taper
 the firmware's own deceleration ramp divisor (the same setting) is also at its
 slowest, which did not hurt here because the ramp jumps on direction changes.
 
-Applied: `SpeedTarget` 60, `DecelerationScale` 250, `Fudge` 10 (all acked and
-persisted). Originals were 100 / 50 / 5. Follow-up for the bench node: a
+Applied first: `SpeedTarget` 60, `DecelerationScale` 250, `Fudge` 10. Originals
+were 100 / 50 / 5.
+
+Fudge study (`run4.csv` to `run6.csv`, later the same day; the user wants fudge
+5 or less). Rest errors in degrees, S 60, D 250:
+
+| MinSpeed | Fudge | moves | rest errors | stalls |
+|---|---|---|---|---|
+| 32 | 5 | 6 | +4 -12 +8 -5 +2 -5 | 0 |
+| 28 | 5 | 6 | +1 -4 +5 -3 -1 -3 | 0 |
+| 28 | 3 | 6 | +1 -6 +8 -6 +3 -5 | 0 |
+| 25 | 5 | 6 | -2 +1 +4 -1 -3 +1 | 0 |
+| 25 | 3 | 6 | -1 -3 +8 -3 -2 -4 | 0 |
+| 25 | 5 | 12 (20-180 deg) | +3 +2 +2 -1 +2 +1 +1 -6 -2 -6 | **2** (+150 stopped 22 short, +180 never reached) |
+| 28 | 5 | 12 | -2 -8 +2 -8 -1 -6 +3 -3 +3 -1 -5 | **1** (+180) |
+| 30 | 5 | 12 | +5 -8 +1 -6 0 -3 -1 0 -1 -3 +2 -1 | 0 |
+| 32 | 5 | 12 | +2 -6 +2 -5 +3 -5 +2 -4 -3 +2 +4 -4 | 0 |
+
+Steady `:DPR` at 25 and 28 from rest did not move the dome at all (stiction);
+the low floors only work while the dome is already moving, and stall on the
+tight spots. Short moves (20-40 deg) arrive at 60-75 deg/s whatever the floor,
+which is what limits fudge 3.
+
+Final: `SpeedTarget` 60, `DecelerationScale` 250, `Fudge` 5, `MinSpeed` 32. Follow-up for the bench node: a
 `start_position_sweep` service that automates these two measurements.
 
 ## Next
