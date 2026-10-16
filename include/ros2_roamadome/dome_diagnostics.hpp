@@ -41,6 +41,9 @@ struct DomeDiagnosticsState
   // Link
   uint64_t position_reports = 0;
   std::optional<TimePoint> last_position_report;
+  /// Report intervals longer than the warning threshold, and the last one seen.
+  uint32_t report_gaps = 0;
+  double last_report_gap_s = 0.0;
   bool position_reporting_enabled = false;
   uint32_t status_polls_answered = 0;
   std::optional<TimePoint> last_status_response;
@@ -119,8 +122,12 @@ void applyStatusSection(
   DomeDiagnosticsState::TimePoint now);
 
 /// @brief Note that a "DOME POSITION:" report arrived.
+/// @return the interval since the previous report in seconds (0 for the first one)
 ros2_roamadome_PUBLIC
-void recordPositionReport(DomeDiagnosticsState * state, DomeDiagnosticsState::TimePoint now);
+double recordPositionReport(
+  DomeDiagnosticsState * state,
+  DomeDiagnosticsState::TimePoint now,
+  double gap_warn_s = 0.0);
 
 /// @brief Build the three statuses "roamadome: link", "roamadome: sensor" and
 /// "roamadome: motion" for a diagnostic_msgs/DiagnosticArray.

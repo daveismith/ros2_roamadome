@@ -358,6 +358,7 @@ private:
   // Diagnostics (docs/dome_diagnostics_plan.md, phase 2). diagnosticsState_ is
   // mutated from the serial read path and read by the 1 Hz timer.
   uint32_t statusPollIntervalMs_ = 10000;
+  uint32_t reportGapWarnMs_ = 250;  // WARN when position reports are further apart; 0 disables
   DomeDiagnosticsState diagnosticsState_;
   mutable std::mutex diagnostics_mutex_;  // Protects diagnosticsState_
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnosticsPublisher_;

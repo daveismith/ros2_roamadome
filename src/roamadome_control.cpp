@@ -334,6 +334,18 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   if (!parseOptionalUInt32Parameter(
       parameters,
       logger_,
+      "report_gap_warn_ms",
+      250,
+      nullptr,
+      "",
+      &reportGapWarnMs_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
       "status_poll_interval_ms",
       10000,
       nullptr,
@@ -1833,9 +1845,19 @@ void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
   velocity_ = estimate.velocity_rad_s;
   ++telemetrySequence_;
 
+  double gap_s = 0.0;
+  uint32_t gaps = 0;
   {
     std::lock_guard<std::mutex> lock(diagnostics_mutex_);
-    recordPositionReport(&diagnosticsState_, now_steady);
+    gap_s = recordPositionReport(&diagnosticsState_, now_steady, reportGapWarnMs_ / 1000.0);
+    gaps = diagnosticsState_.report_gaps;
+  }
+  if (reportGapWarnMs_ > 0 && gap_s * 1000.0 > reportGapWarnMs_) {
+    // Reports normally arrive every cycle; a long gap means the firmware, the
+    // USB link or this process stalled. Log it with its length so the next
+    // dropout is self-documenting.
+    RCLCPP_WARN(logger_, "Position report gap of %.0f ms (gap #%u since activation)",
+      gap_s * 1000.0, gaps);
   }
 
   RCLCPP_DEBUG(logger_, "Position updated: %u° = %.4f rad, unwrapped %.4f rad, velocity %.4f rad/s",
