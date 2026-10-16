@@ -162,3 +162,32 @@ To inspect: park at 198 and at 252, the spots are under sensor 0 (GPIO 18);
 at 238 and 292 they are under sensor 1 (GPIO 19). Compare gap and track
 surface there with a clean angle such as 207, and the gap at sensors 0 and 1
 with the other seven.
+
+## Addendum 2: the same spots glitch without the dome
+
+Repeated the rotation run (35 % and 50 %, both directions) with the dome shell
+removed, same scripts (`ring_nodome_run.csv`, `ctl_nodome_run.csv`), and the
+parked holds at 253 and near 198 (`ring_nodome_static.csv`).
+
+| Spurious "B" by track position | With dome (runs 1+2, 12399 samples) | No dome (8684 samples) |
+|---|---|---|
+| sensor 0 at 198-201 | 18 | 11 |
+| sensor 0 at 234-237 | 6 | 0 |
+| sensor 0 at 252 | 6 | 4 |
+| sensor 1 at 198-201 | 5 | 7 |
+| sensor 1 at 237 | 9 | 4 |
+| sensor 1 at 252 | 5 | 4 |
+| raw glitches per 1000 samples | 5.0 | 4.3 |
+
+Parked at 253 without the dome the raw mask is correct and steady
+(`-BBB--B--`); with the dome it read solidly wrong (`BBBB--B--`, 260). The
+park at 198 did not converge without the dome (the bare platform overshoots
+the drive pulses), so that spot was only observed in motion.
+
+Conclusion: the defect at track positions 198-201, 234-237 and 252 exists
+with or without the dome, at about the same rate of raw glitches per
+revolution. The dome makes each glitch last longer (long enough to pass the
+median-of-5 and, at 252, to hold at rest), which is why the no-dome bench
+sweeps showed zero jumps and the with-dome sweeps showed many. The physical
+spots to inspect are the same three, under sensor 0 (GPIO 18) when the dome
+reads 198 and 252, and under sensor 1 (GPIO 19) at 238 and 292.
