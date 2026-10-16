@@ -20,6 +20,29 @@
 namespace ros2_roamadome
 {
 
+namespace
+{
+
+// Some tests create an rclcpp::Node and therefore call rclcpp::init(). The
+// context must be shut down before process exit: rmw_zenoh_cpp aborts when the
+// Zenoh runtime is torn down from an atexit handler ("The Thread Local Storage
+// inside Tokio is destroyed").
+class RclcppShutdownEnvironment : public ::testing::Environment
+{
+public:
+  void TearDown() override
+  {
+    if (rclcpp::ok()) {
+      rclcpp::shutdown();
+    }
+  }
+};
+
+const ::testing::Environment * const kRclcppShutdownEnvironment =
+  ::testing::AddGlobalTestEnvironment(new RclcppShutdownEnvironment());
+
+}  // namespace
+
 /**
  * @brief Test fixture for RoamadomeControl tests
  *
