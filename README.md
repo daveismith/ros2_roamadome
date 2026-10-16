@@ -311,7 +311,9 @@ Worked example: this is exactly the situation on the bench robot.
   ([docs/bench_results/2026-10-16-with-dome-new-plate.md](docs/bench_results/2026-10-16-with-dome-new-plate.md)).
 
 **The 2026-10-16 with-dome report is the calibration reference. These are the values to
-configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 15, SpeedTarget 100, Scaling off):
+configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 32, SpeedTarget 100, Scaling off;
+`MinSpeed` was raised from 15 to 32 on 2026-10-16 after this run, see the report's
+"MinSpeed follow-up" section):
 
 - `max_speed_rad_per_sec` **6.56**: the lower measured 100 % rate, from -100 % in the
   operating-settings run. The raw run measured 6.70, and the JSON's fit value is 6.88.

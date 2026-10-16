@@ -626,6 +626,36 @@ the raw runs only.
 6. **Shutdown.** `ros2_control_node` stopped cleanly on SIGINT both times (hardware deactivated),
    with the same `pal_statistics` "context cannot be slept with" errors at exit as before.
 
+## MinSpeed follow-up (2026-10-16, after the run)
+
+The firmware's `MinSpeed` was 15 while the measured minimum sustainable
+percent is 27-32, so `:DPR` requests between 15 and 26 were accepted and
+stalled, and position moves floored their final approach at 15 %. `MinSpeed`
+was set to 32 through `device.min_speed` (acked: `#DPMINSPEED32`, Write
+Settings, Updated; persisted). It is now part of the calibration state.
+
+Check, same session, dome installed (`/home/pi/dome_bench/minspeed_check/`):
+
+- `:DPR20` after the change: the firmware answered `ROTATE SPEED: 0` and the
+  dome did not move. `:DPR35`: accepted, 1.35 rad/s. The sub-stall creep is gone.
+- Position moves (90, 270, 180, 0 degrees, full `SpeedTarget`) before and after:
+
+| MinSpeed | target | REACHED TARGET reported | rest position | overshoot |
+|---|---|---|---|---|
+| 15 | 90 / 270 / 180 / 0 | 85 / 265 / 184 / 5 | 114 / 315 / 159 / 329 | +24 / +45 / -21 / -31 |
+| 32 | 90 / 270 / 180 / 0 | 85 / 265 / 185 / 5 | 118 / 317 / 155 / 327 | +28 / +47 / -25 / -33 |
+
+No position timeouts either way. `MinSpeed` makes no difference to the
+overshoot, which is 25-47 degrees with the dome: the firmware declares the
+target reached at the 5 degree fudge boundary while the dome is still turning
+at about 3.5 rad/s (peak 3.5-4.2 rad/s on a 135-180 degree move), then the
+Sabertooth ramp (`setRamping(80)`, fixed in `DomeDriveSabertooth::setup`) and
+the dome's inertia carry it on. Settling takes 3.1-3.7 s per move. The 50
+degree `DecelerationScale` is too short for a dome whose response time is
+1.5 s; raising `device.deceleration_scale` (for example to 150) and lowering
+`device.speed_target` for position moves are the firmware-side knobs to try.
+Without the dome (phase 2 check) the same moves overshot by only a few degrees.
+
 ## Next
 
 Phase 7 can proceed with [THE VALUES TO CONFIGURE](#the-values-to-configure). Set the acceptance
