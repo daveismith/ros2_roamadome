@@ -225,18 +225,23 @@ def test_move_outcome_from_motion_status():
               'last_move_completed_age_s': '40.0'}
     after = {'position_timeouts': '2', 'last_target_reached_deg': '250',
              'last_move_completed_age_s': '1.2'}
-    assert control.move_outcome(before, after) == {
+    assert control.move_outcome(before, after, True, 4.0) == {
         'status_seen': True, 'position_timeouts': 0, 'reached_target_deg': 250}
     timed_out = {'position_timeouts': '3', 'last_target_reached_deg': '100',
                  'last_move_completed_age_s': '52.0'}
-    assert control.move_outcome(before, timed_out) == {
+    assert control.move_outcome(before, timed_out, True, 13.0) == {
         'status_seen': True, 'position_timeouts': 1, 'reached_target_deg': None}
-    # A move to the same target as the last one still counts if completed recently.
+    # A move to the same target as the last one still counts if completed during it.
     same = dict(after, last_target_reached_deg='100')
-    assert control.move_outcome(before, same)['reached_target_deg'] == 100
-    assert control.move_outcome(before, before) == {
+    assert control.move_outcome(before, same, True, 4.0)['reached_target_deg'] == 100
+    # The previous move's REACHED (8 s ago) is not credited to a 4 s move that timed out.
+    stale = {'position_timeouts': '3', 'last_target_reached_deg': '250',
+             'last_move_completed_age_s': '8.0'}
+    assert control.move_outcome(before, stale, True, 4.0) == {
+        'status_seen': True, 'position_timeouts': 1, 'reached_target_deg': None}
+    assert control.move_outcome(before, after, False, 4.0) == {
         'status_seen': False, 'position_timeouts': None, 'reached_target_deg': None}
-    assert control.move_outcome({}, {'last_target_reached_deg': 'unknown'}) == {
+    assert control.move_outcome({}, {'last_target_reached_deg': 'unknown'}, True, 4.0) == {
         'status_seen': True, 'position_timeouts': None, 'reached_target_deg': None}
 
 
@@ -297,10 +302,11 @@ def test_bad_percent_lists_are_rejected_not_fixed():
 
 
 def test_position_sweep_parameters_are_validated():
-    assert errors_with(position_sweep__moves_deg=[-359, 359, 1]) == []
+    assert errors_with(position_sweep__moves_deg=[-179, 179, 1]) == []
     assert errors_with(position_sweep__moves_deg=[])
     assert errors_with(position_sweep__moves_deg=[150, 0])
-    assert errors_with(position_sweep__moves_deg=[360])
+    assert errors_with(position_sweep__moves_deg=[180])
+    assert errors_with(position_sweep__moves_deg=[-200])
     assert errors_with(position_sweep__moves_deg=[True])
     assert errors_with(position_sweep__stop_percents=[50, 35])
     assert errors_with(position_sweep__stop_run_s=0.0)

@@ -382,8 +382,37 @@ def test_sensor_sweep_scores_jumps_reversals_stalls_and_histogram():
     assert steps[0]['velocity_rad_s'] == pytest.approx(-math.radians(86.0), rel=0.03)
     assert steps[2]['mean_velocity_rad_s'] == pytest.approx(-math.radians(150.0), rel=0.03)
     assert result['totals']['jumps'] == 2 and result['totals']['reversals'] == 1
+    assert result['plugin_gate']['known'] is False   # no diagnostics snapshots in run.json
     assert result['suggested_pass'] is False
     json.loads(analysis.dumps_json(result))
+
+
+def test_sensor_sweep_counts_plugin_gate_rejections_against_the_pass():
+    run_info, rows = sensor_run()
+    run_info['steps'] = run_info['steps'][1:3]          # the clean steps only
+    rows = [r for r in rows if r.step_index in (1, 2)]
+    # The sensor_run reversal is in step 1: make it a positive-percent step to drop it.
+    run_info['steps'][0]['direction'] = 1
+    base = {'sensor_diagnostics_before': {'reports_held': '0', 'reports_rejected': '0',
+                                          'jumps_confirmed': '0', 'gate_resyncs': '0'}}
+    clean = dict(run_info, **base, sensor_diagnostics_after={
+        'reports_held': '1', 'reports_rejected': '0', 'jumps_confirmed': '1',
+        'gate_resyncs': '0'})
+    result = analysis.analyze_sensor_sweep(clean, rows)
+    assert result['plugin_gate'] == {'reports_held': 1, 'reports_rejected': 0,
+                                     'jumps_confirmed': 1, 'gate_resyncs': 0, 'known': True}
+    assert result['suggested_pass'] == (result['totals']['jumps'] == 0 and
+                                        result['totals']['reversals'] == 0)
+    rejected = dict(run_info, **base, sensor_diagnostics_after={
+        'reports_held': '3', 'reports_rejected': '2', 'jumps_confirmed': '0',
+        'gate_resyncs': '0'})
+    result = analysis.analyze_sensor_sweep(rejected, rows)
+    assert result['plugin_gate']['reports_rejected'] == 2
+    assert result['suggested_pass'] is False
+    # An older plugin without the counters leaves the verdict to the telemetry.
+    partial = dict(run_info, sensor_diagnostics_before={'sensor_errors': '0'},
+                   sensor_diagnostics_after={'sensor_errors': '0'})
+    assert analysis.analyze_sensor_sweep(partial, rows)['plugin_gate']['known'] is False
 
 
 def test_sensor_sweep_gates_stalls_below_known_min_percent():
@@ -636,11 +665,14 @@ def test_position_sweep_stop_curve_and_moves():
     # d = v^2 / 800 through (100, 12.5) and (200, 50): slope 0.375 s, intercept -25 deg
     assert fit['slope'] == pytest.approx(0.375, abs=0.05)
     assert result['stop_curve']['fit_positive_percent'] is None   # one point per direction
+    assert result['stop_curve']['fit_steps'] == [0, 1]
+    assert not stops[0]['pre_stop_crosses_zero'] and not stops[0]['coast_crosses_zero']
 
     moves = result['moves']
     assert moves['count'] == 2 and moves['completed'] == 2 and moves['timed_out'] == 0
     plus, minus = moves['steps']
     assert plus['target_deg'] == 100 and plus['rest_error_deg'] == 3
+    assert not plus['target_in_dead_zone']
     assert plus['furthest_past_target_deg'] == 3 and plus['reached_target']
     assert plus['peak_deg_s'] == pytest.approx(120.0, abs=10.0)
     assert 0.6 < plus['settle_s'] < 1.1
@@ -666,6 +698,8 @@ def test_position_sweep_tolerates_missing_stop_and_empty_move():
     result = analysis.analyze_position_sweep(run_info, rows)
     first = result['stop_curve']['steps'][0]
     assert first['stop_found'] is True          # falls back to the first coast sample
+    assert result['stop_curve']['fit_steps'] == [1]   # a stalled step is not fitted
+    assert result['stop_curve']['fit'] is None
     empty = result['moves']['steps'][1]
     assert empty['samples'] == 0 and not empty['reached_target']
     assert result['moves']['completed'] == 2    # end_reason from run.json

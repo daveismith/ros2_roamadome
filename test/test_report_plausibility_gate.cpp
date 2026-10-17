@@ -186,6 +186,50 @@ TEST(ReportPlausibilityGate, CrossesZeroHelper)
   EXPECT_TRUE(Gate::crossesZero(359, 1));
 }
 
+TEST(ReportPlausibilityGate, DomeFasterThanTheLimitResyncsInsteadOfFreezing)
+{
+  // 700 deg/s against a 360 deg/s gate: 19.6 deg per report, 12 allowed. Every
+  // report disagrees with the accepted history and is 19.6 deg from the held
+  // one too, so nothing ever confirms a held report. After kResyncAfter
+  // disagreements the newest report is accepted and the position follows.
+  Gate gate = gateOf360();
+  double t = 0.0;
+  double deg = 0.0;
+  gate.update(at(t), 0);
+  std::vector<uint16_t> seen;
+  for (int i = 1; i <= 7; ++i) {
+    t += 0.028;
+    deg += 19.6;
+    const auto d = gate.update(at(t), static_cast<uint16_t>(deg));
+    for (const auto v : accepted(d)) {
+      seen.push_back(v);
+    }
+    if (d.resynced) {
+      EXPECT_EQ(d.accepted_count, 1u);
+    }
+  }
+  // Every third report is accepted as a resync, so the position follows the dome
+  // with at most kResyncAfter reports of lag instead of freezing.
+  EXPECT_GE(gate.resyncCount(), 2u);
+  ASSERT_FALSE(seen.empty());
+  EXPECT_GE(seen.back(), static_cast<uint16_t>(deg - (Gate::kResyncAfter - 1) * 19.6 - 1.0));
+  EXPECT_LE(seen.back(), static_cast<uint16_t>(deg));
+}
+
+TEST(ReportPlausibilityGate, ResetCountersZeroesEverything)
+{
+  Gate gate = gateOf360();
+  gate.update(at(0.000), 100);
+  EXPECT_TRUE(gate.update(at(0.028), 200).held);
+  gate.update(at(0.056), 101);
+  EXPECT_EQ(gate.rejectedCount(), 1u);
+  gate.resetCounters();
+  EXPECT_EQ(gate.heldCount(), 0u);
+  EXPECT_EQ(gate.rejectedCount(), 0u);
+  EXPECT_EQ(gate.confirmedCount(), 0u);
+  EXPECT_EQ(gate.resyncCount(), 0u);
+}
+
 TEST(ReportPlausibilityGate, ResetForgetsHistoryButKeepsCounters)
 {
   Gate gate = gateOf360();

@@ -40,9 +40,11 @@ namespace ros2_roamadome
 /// decides: if it is plausible from the last accepted report, the held one was a
 /// glitch and is dropped; if it is only plausible from the held one, the dome
 /// really moved and both are accepted, in order; if it is plausible from neither,
-/// the held one is dropped and the new one is held. A report is therefore
-/// delayed by at most one report interval and never lost unless the one after it
-/// disagrees with it.
+/// the held one is dropped and the new one is held. A real report is therefore
+/// delayed by one report interval, and lost only if the one after it disagrees
+/// with it. If `kResyncAfter` reports in a row disagree with the accepted history
+/// (the dome is faster than `max_deg_s`, or the history is wrong), the newest one
+/// is accepted as a resync so the position can never freeze.
 ///
 /// Two reports read in the same controller cycle are stamped microseconds apart
 /// although the firmware sent them a report interval apart, so the interval used
@@ -73,7 +75,12 @@ public:
     Report dropped{};
     /// A previously held report was confirmed by this one: a real jump.
     bool confirmed = false;
+    /// Accepted although implausible, after kResyncAfter disagreements in a row.
+    bool resynced = false;
   };
+
+  /// Consecutive reports disagreeing with the accepted history before a resync.
+  static constexpr uint32_t kResyncAfter = 3;
 
   explicit ReportPlausibilityGate(
     double max_deg_s = 0.0,
@@ -92,13 +99,24 @@ public:
   uint32_t heldCount() const {return held_count_;}
   uint32_t rejectedCount() const {return rejected_count_;}
   uint32_t confirmedCount() const {return confirmed_count_;}
+  uint32_t resyncCount() const {return resync_count_;}
   bool holding() const {return held_.has_value();}
 
-  /// @brief Forget the history (counters are kept; the owner resets them with its own state).
+  /// @brief Forget the history; the counters are kept (see resetCounters()).
   void reset()
   {
     last_.reset();
     held_.reset();
+    disagreements_ = 0;
+  }
+
+  /// @brief Zero the counters (the owner's diagnostics are "since activation").
+  void resetCounters()
+  {
+    held_count_ = 0;
+    rejected_count_ = 0;
+    confirmed_count_ = 0;
+    resync_count_ = 0;
   }
 
   /// @brief Judge one report.
@@ -122,6 +140,7 @@ public:
         // Two reports agree with each other but not with the history: a real jump.
         const Report confirmed = *held_;
         held_.reset();
+        disagreements_ = 0;
         ++confirmed_count_;
         decision.confirmed = true;
         accept(&decision, confirmed);
@@ -134,11 +153,20 @@ public:
 
     if (plausible(*last_, report)) {
       accept(&decision, report);
-    } else {
-      held_ = report;
-      ++held_count_;
-      decision.held = true;
+      return decision;
     }
+    if (++disagreements_ >= kResyncAfter) {
+      // Reports keep disagreeing with the history (for example a dome faster than
+      // max_deg_s, whose every report is a little beyond the allowance): the history
+      // is what is wrong. Accept the newest report rather than freeze.
+      ++resync_count_;
+      decision.resynced = true;
+      accept(&decision, report);
+      return decision;
+    }
+    held_ = report;
+    ++held_count_;
+    decision.held = true;
     return decision;
   }
 
@@ -170,6 +198,7 @@ private:
       decision->accepted[decision->accepted_count++] = report;
     }
     last_ = report;
+    disagreements_ = 0;
   }
 
   void drop(Decision * decision)
@@ -186,9 +215,11 @@ private:
   double wrap_allowance_deg_;
   std::optional<Report> last_;
   std::optional<Report> held_;
+  uint32_t disagreements_ = 0;
   uint32_t held_count_ = 0;
   uint32_t rejected_count_ = 0;
   uint32_t confirmed_count_ = 0;
+  uint32_t resync_count_ = 0;
 };
 
 }  // namespace ros2_roamadome

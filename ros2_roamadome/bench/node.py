@@ -783,18 +783,23 @@ class BenchNode(Node):
     # Position sweep (README "Position-move tuning")
     # ------------------------------------------------------------------
 
-    def _wait_still(self, still_s, max_s, strict=True):
+    def _wait_still(self, still_s, max_s, strict=True, moved_from=None, min_move_deg=2):
         """
         Wait until the reported angle has not changed for ``still_s`` seconds.
 
-        Keeps draining telemetry into the current step. Returns True at
-        standstill, False after ``max_s``. Position-based, unlike
+        Keeps draining telemetry into the current step. Returns ``'still'`` at
+        standstill, ``'timeout'`` after ``max_s``. With ``moved_from`` (a start
+        angle) standstill only counts once the dome has moved at least
+        ``min_move_deg`` away from it, so a move that has not started yet (the
+        firmware still queueing it) is not mistaken for a finished one;
+        ``'no_motion'`` is returned if it never moves. Position-based, unlike
         ``_wait_standstill``, so it also ends a firmware move, during which
         ``commanded_percent`` stays 0.
         """
         start = time.monotonic()
         ref = None
         last_change = start
+        moved = moved_from is None
         while time.monotonic() - start < max_s:
             self._drain()
             if strict:
@@ -802,23 +807,33 @@ class BenchNode(Node):
                 self._check_link()
             msg, rx = self._latest()
             if msg is not None and rx >= start:
-                if ref is None or int(msg.position_deg) != ref:
-                    ref = int(msg.position_deg)
+                deg = int(msg.position_deg)
+                if not moved and abs(analysis.shortest_delta(moved_from, deg)) >= min_move_deg:
+                    moved = True
+                if ref is None or deg != ref:
+                    ref = deg
                     last_change = time.monotonic()
-                elif time.monotonic() - last_change >= still_s:
-                    return True
+                elif moved and time.monotonic() - last_change >= still_s:
+                    return 'still'
             time.sleep(LOOP_PERIOD_S)
-        return False
+        return 'timeout' if moved else 'no_motion'
 
     def _motion_status_values(self, after_wall=None, wait_s=0.0):
-        """Latest roamadome: motion values, optionally only one stamped after ``after_wall``."""
+        """
+        Latest roamadome: motion values with their stamp and freshness.
+
+        Returns ``(values, stamp, fresh)``; with ``after_wall`` it waits up to
+        ``wait_s`` for a status stamped after it, and ``fresh`` says whether one
+        arrived.
+        """
         deadline = time.monotonic() + wait_s
         while True:
             with self._lock:
                 stamp = self._motion_stamp
                 values = dict(self._motion_values)
-            if after_wall is None or stamp > after_wall or time.monotonic() >= deadline:
-                return values
+            fresh = after_wall is None or stamp > after_wall
+            if fresh or time.monotonic() >= deadline:
+                return values, stamp, fresh
             time.sleep(0.1)
 
     def _begin_step(self, meta, phase, direction):
@@ -859,7 +874,7 @@ class BenchNode(Node):
             self._set_status(phase=analysis.PHASE_COAST)
             self._drive(0)
             meta['t_stop_wall'] = time.time()
-            meta['settled'] = self._wait_still(p['settle_s'], STOP_SETTLE_TIMEOUT_S)
+            meta['settled'] = self._wait_still(p['settle_s'], STOP_SETTLE_TIMEOUT_S) == 'still'
             meta['end_reason'] = 'completed' if outcome == 'done' else 'stalled'
         finally:
             self._drain()
@@ -883,7 +898,7 @@ class BenchNode(Node):
         meta = {'index': index, 'kind': 'move', 'percent': 0, 'direction': direction,
                 'start_deg': start, 'target_deg': target, 'delta_deg': delta,
                 'end_reason': 'incomplete'}
-        before = self._motion_status_values()
+        before, _, _ = self._motion_status_values()
         self.get_logger().info('Step %d (move): %d -> %d deg (delta %+d)'
                                % (index, start, target, delta))
         self._check_abort()
@@ -893,20 +908,23 @@ class BenchNode(Node):
         meta['t_move_wall'] = time.time()
         self._begin_step(meta, analysis.PHASE_MOVE, direction)
         try:
-            settled = self._wait_still(p['settle_s'], p['move_timeout_s'])
+            outcome = self._wait_still(p['settle_s'], p['move_timeout_s'], moved_from=start)
             t_still = time.time()
-            meta['settled'] = settled
-            meta['end_reason'] = 'completed' if settled else 'timeout'
-            if not settled:
-                self.get_logger().warn('Step %d: no standstill within %.0f s of the move'
-                                       % (index, p['move_timeout_s']))
+            meta['settled'] = outcome == 'still'
+            meta['end_reason'] = 'completed' if outcome == 'still' else outcome
+            if outcome != 'still':
+                self.get_logger().warn('Step %d: %s within %.0f s of the move' % (
+                    index, 'no standstill' if outcome == 'timeout' else 'no motion',
+                    p['move_timeout_s']))
         finally:
             self._drain()
             self._step = None
         # The firmware's own verdict (REACHED TARGET / position timeout) reaches the
         # 1 Hz motion status a little later.
-        after = self._motion_status_values(after_wall=t_still, wait_s=MOTION_STATUS_WAIT_S)
-        meta['firmware'] = control.move_outcome(before, after)
+        after, stamp, fresh = self._motion_status_values(after_wall=t_still,
+                                                         wait_s=MOTION_STATUS_WAIT_S)
+        meta['firmware'] = control.move_outcome(before, after, fresh,
+                                                stamp - meta['t_move_wall'])
         self._set_status(phase='releasing')
         self._drive(0)    # releases the bench claim; the move is over
         self._wait_standstill(strict=True)
@@ -1064,6 +1082,12 @@ class BenchNode(Node):
         self._gate.begin_stopping()
         self._step = None
         self._set_status(state='stopping', phase='stopping')
+        if self._gate.move_target is not None:
+            # A firmware move cannot be cancelled; wait for it to end before the
+            # claim is released, so nothing else can drive the dome under it.
+            self.get_logger().warn('A bench move is in flight; waiting for it to finish')
+            self._wait_still(self._params.get('settle_s', 1.2),
+                             self._params.get('move_timeout_s', 12.0), strict=False)
         stopped = False
         message = ''
         for _ in range(3):

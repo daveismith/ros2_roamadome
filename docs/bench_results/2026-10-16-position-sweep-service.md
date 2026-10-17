@@ -114,3 +114,29 @@ keep-alive calls every 0.5 s re-sent nothing, each claim released with percent 0
   runs at SpeedTarget 100 (full velocity range, position moves tuned with `:DPA<deg>,<speed>`
   per move, which the firmware supports but the plugin does not send yet) or at 60 (current;
   velocity mapping to be re-measured at these settings for phase 7).
+
+## Re-run after review (20:47, `2026-10-16-position-sweep-service-position-rerun.json`)
+
+The PR review added an outstanding-firmware-move flag in the plugin (no bench drive or
+settings write until `REACHED TARGET`), a gate resync, stricter standstill detection for moves
+(the dome must first leave its start angle) and the firmware verdict tied to the move's own
+time window. Same settings, same defaults, run directory
+`~/dome_bench/position_sweep/20261016-204753-position`.
+
+- Status `complete`, 12/12 moves completed and `REACHED TARGET` for each, 0 firmware timeouts,
+  0 jumps, 3029 samples, largest gap 67 ms, gate counters all 0.
+- The startup `#DPREPORT28` probe timed out once and succeeded on its retry (the known
+  once-per-session miss); `position_reporting_enabled` nevertheless read true.
+- Rest errors: +10, -3, +16, -3, +10, -4, +11, -2, +6, -4, +9, -6 (mean |e| 7.0; angle
+  increasing 10.3, decreasing 3.7). Worse than the 20:26 run (4.9) in the angle-increasing
+  direction only. The dome started this run at 257 deg, so every angle-increasing move ended
+  between 299 and 354 deg (the 20:26 run's ended at 28 to 111), and the arrival speeds there
+  were 69 to 88 deg/s against 53 to 70 before. This is the position-dependent friction the
+  afternoon's tuning noted (floor speed 40 to 100 deg/s with end angle): the 280 to 355 deg
+  sector is a fast, low-friction one for angle-increasing travel. The lubrication the user
+  plans is the fix; until then expect +10 deg there with Fudge 5.
+- Stop curve at SpeedTarget 60 again (speeds 85 to 249 deg/s, all clamped runs); two steps
+  flagged for a 0-crossing in the speed window or coast. The fit over all eight,
+  `0.22 s x v + 17 deg` (R squared 0.66), differs from the 20:26 run's `0.41 s x v - 14`
+  because the clamped steps all sit at one speed with 62 to 74 deg of scatter; the curve
+  needs SpeedTarget 100 to be meaningful, as noted above.

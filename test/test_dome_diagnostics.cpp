@@ -110,6 +110,7 @@ TEST(DomeDiagnostics, SensorWarnsAfterARejectedReportThenClears)
   state.reports_held = 2;
   state.reports_rejected = 1;
   state.jumps_confirmed = 1;
+  state.gate_resyncs = 4;
   state.last_report_rejected = at(1.0);
 
   auto statuses = buildDomeDiagnostics(state, healthyReadings(), {}, at(4.0));
@@ -119,6 +120,7 @@ TEST(DomeDiagnostics, SensorWarnsAfterARejectedReportThenClears)
   EXPECT_EQ(value(sensor, "reports_held"), "2");
   EXPECT_EQ(value(sensor, "reports_rejected"), "1");
   EXPECT_EQ(value(sensor, "jumps_confirmed"), "1");
+  EXPECT_EQ(value(sensor, "gate_resyncs"), "4");
   EXPECT_EQ(value(sensor, "last_rejection_age_s"), "3.0");
 
   statuses = buildDomeDiagnostics(state, healthyReadings(), {}, at(12.0));

@@ -61,6 +61,8 @@ struct DomeDiagnosticsState
   uint32_t reports_held = 0;
   uint32_t reports_rejected = 0;
   uint32_t jumps_confirmed = 0;
+  /// Reports accepted although implausible after repeated disagreement (gate too tight).
+  uint32_t gate_resyncs = 0;
   std::optional<TimePoint> last_report_rejected;
 
   // Motion

@@ -322,6 +322,7 @@ std::vector<DiagnosticStatus> buildDomeDiagnostics(
     addValue(&sensor, "reports_held", std::to_string(state.reports_held));
     addValue(&sensor, "reports_rejected", std::to_string(state.reports_rejected));
     addValue(&sensor, "jumps_confirmed", std::to_string(state.jumps_confirmed));
+    addValue(&sensor, "gate_resyncs", std::to_string(state.gate_resyncs));
     addValue(&sensor, "last_rejection_age_s", formatAge(state.last_report_rejected, now));
     addValue(&sensor, "position_deg",
       formatDouble(readings.position_rad * 180.0 / M_PI, 1));

@@ -25,6 +25,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -249,8 +250,15 @@ private:
   // Atomic: written by the controller manager thread (mode switch), read by the
   // bench drive service callback on the executor thread.
   std::atomic<CommandMode> currentMode_{CommandMode::IDLE};
-  double lastSentPosition_ = -1.0;  // Track last sent position to avoid redundant commands
-  double lastSentVelocity_ = 0.0;   // Track last sent velocity to avoid redundant commands
+  // Last position / velocity command sent, NaN when none since the mode was entered.
+  double lastSentPosition_ = std::numeric_limits<double>::quiet_NaN();
+  double lastSentVelocity_ = std::numeric_limits<double>::quiet_NaN();
+  // A :DPA (bench move or position controller) has been sent and the firmware has
+  // not yet reported REACHED TARGET / REACHED HOME / a position timeout. The host
+  // cannot cancel such a move (:DPR0 does not clear the firmware's target mode and
+  // a non-zero :DPR only overrides it while non-zero), so while it is outstanding
+  // no bench drive may start. Set from the write path, cleared from the read path.
+  std::atomic<bool> firmwareMoveOutstanding_{false};
   double maxSpeedRadPerSec_ = 3.14;  // Default: ~180°/s (configurable via parameter)
   uint32_t serialSectionFlushTimeoutMs_ = 500;
 

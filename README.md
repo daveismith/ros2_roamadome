@@ -120,13 +120,19 @@ rather than applied; `dt` is never taken shorter than the report interval, and a
 decides: plausible from the last accepted one, the held report was a sensor-ring misread
 and is dropped (WARN `Rejected implausible position report`); plausible only from the held
 one, the dome really moved and both are applied in order (INFO); plausible from neither,
-the held one is dropped and the new one held. A real report is therefore delayed by at most
-one report, and a single misread no longer shifts `unwrapped_rad` by a turn (the failure
-seen on the old sensor plate). `position_deg`, `position_rad`, `unwrapped_rad`,
-`velocity_rad_s` and `sequence` only ever carry accepted reports; a held report that is
-later confirmed is published with the stamp of the cycle that confirmed it. The gate's
-counters are on the `roamadome: sensor` diagnostic (`reports_held`, `reports_rejected`,
-`jumps_confirmed`), which is WARN for 10 s after a rejection. The `r2_bringup` URDF sets
+the held one is dropped and the new one held. A real report is therefore delayed by one
+report, and lost only if the one after it disagrees with it; a single misread no longer
+shifts `unwrapped_rad` by a turn (the failure seen on the old sensor plate). If three
+reports in a row disagree with the accepted history (a dome faster than
+`max_plausible_deg_s`, whose every step is a little over the allowance), the newest is
+accepted as a **resync** so the position can never freeze; set the limit well above the
+real top speed. `position_deg`, `position_rad`, `unwrapped_rad`, `velocity_rad_s` and
+`sequence` only ever carry accepted reports; a held report that is later confirmed is
+published with the stamp of the cycle that confirmed it. The gate's counters are on the
+`roamadome: sensor` diagnostic (`reports_held`, `reports_rejected`, `jumps_confirmed`,
+`gate_resyncs`), which is WARN for 10 s after a rejection, and the bench node folds their
+change over a sensor sweep into `suggested_pass` (`plugin_gate` in `sensor_sweep.json`),
+since a misread the gate dropped never reaches the telemetry the sweep scores. The `r2_bringup` URDF sets
 600 deg/s, 1.5 x the measured top speed of 381 deg/s (6.65 rad/s); pick 1.5 x the speed
 sweep's maximum for another dome. Implementation: `ReportPlausibilityGate` in
 `include/ros2_roamadome/report_plausibility_gate.hpp`.
@@ -639,6 +645,7 @@ Measured on the assembled dome, new plate, MinSpeed 32:
 | 60 | 250 | 10 | -2, -5, -2, -1, -5, -2 |
 | **60** | **250** | **5** | **+2, -6, +2, -5, +3, -5, +2, -4, -3, +2, +4, -4** (12 moves, 20 to 150 deg) |
 | 60 | 250 | 5 | 0, -5, +9, -2, +5, -7, +9, -3, +4, -3, +7, -5 (position sweep service, same evening; arrival 52-79 deg/s, predicted coast 8-18 deg) |
+| 60 | 250 | 5 | +10, -3, +16, -3, +10, -4, +11, -2, +6, -4, +9, -6 (service re-run from 257 deg: every angle-increasing move ended in the fast 299-354 deg sector, arriving at 69-88 deg/s; the rest error depends on the end angle until the friction is evened out) |
 
 Fudge versus `MinSpeed` (dome installed, S 60, D 250): the arrival speed at the
 boundary is the floor speed, so a smaller fudge only works with a lower floor, and
@@ -742,14 +749,17 @@ Commands can be published to controller topics or issued via the controller mana
 - **Position mode.** When a position controller claims the joint, the interface sets the
   command interface to the dome's current angle and sends nothing until the controller
   writes a different value (more than 0.01 rad away), so activating a controller no longer
-  sends the dome to 0 deg. A `NaN` command (an interface the controller has not written)
-  sends nothing either.
+  sends the dome to 0 deg. A `NaN` command (a controller that writes `NaN`) sends nothing.
+  In velocity mode the command starts at 0 and the first non-zero value is sent.
 - **A firmware position move cannot be cancelled from the host.** `:DPA` hands the move to
   the firmware's target mode, and `:DPR0` (what the interface sends on a mode switch, a bench
   stop or deactivation) does not clear that mode: a non-zero `:DPR` overrides the move only
   while it is non-zero, and at `:DPR0` the firmware resumes it. A move therefore always ends
   by itself, at `REACHED TARGET` or at the firmware's `device.timeout` without dome movement.
-  Switch controllers, or deactivate, when the dome is at rest.
+  Switch controllers, or deactivate, when the dome is at rest. While such a move is
+  outstanding (a `:DPA` sent and no `REACHED TARGET`, `REACHED HOME` or timeout seen yet)
+  the interface refuses non-zero bench drives and settings writes, and logs a WARN when a
+  controller starts.
 
 ## Setting up the Hardware Device
 

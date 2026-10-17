@@ -116,7 +116,8 @@ RoamadomeControl::RoamadomeControl()
 : logger_(rclcpp::get_logger("RoamadomeControl")), position_(0.0), velocity_(0.0),
   cmd_position_(0.0), cmd_velocity_(0.0),
   currentMode_(CommandMode::IDLE),
-  lastSentPosition_(-1.0), lastSentVelocity_(0.0),
+  lastSentPosition_(std::numeric_limits<double>::quiet_NaN()),
+  lastSentVelocity_(std::numeric_limits<double>::quiet_NaN()),
   configRefreshIntervalMs_(60000)
 {
   std::cout << "RoamadomeControl initialized." << std::endl;
@@ -1016,6 +1017,11 @@ bool RoamadomeControl::rotationInProgress(std::string * reason) const
       " deg is active; release it (bench drive 0) before changing settings";
     return true;
   }
+  if (firmwareMoveOutstanding_.load()) {
+    *reason = "a firmware position move is still outstanding; wait for REACHED TARGET "
+      "before changing settings";
+    return true;
+  }
   return false;
 }
 
@@ -1271,6 +1277,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
   // The unwrapped angle and sequence counter are "since activation".
   positionTracker_.reset();
   plausibilityGate_.reset();
+  plausibilityGate_.resetCounters();
+  firmwareMoveOutstanding_.store(false);
   telemetrySequence_ = 0;
   velocity_ = std::numeric_limits<double>::quiet_NaN();
 
@@ -1481,6 +1489,14 @@ hardware_interface::return_type RoamadomeControl::write(
         }
         queued_command = sendQueue_.front();
         sendQueue_.pop();
+        if (queued_command->flow == SendQueueCommand::Flow::PARAMETER_UPDATE_ACK) {
+          // Mark it in flight before the serial write, so a bench request that
+          // arrives during the write cannot start motion behind a settings write.
+          activeSendQueueCommand_ = *queued_command;
+          sendQueueCommandActive_ = true;
+          sendQueueStage_ = SendQueueStage::WAIT_WRITE_SETTINGS;
+          sendQueueStageStartTime_ = std::chrono::steady_clock::now();
+        }
         break;
       }
     }
@@ -1501,15 +1517,16 @@ hardware_interface::return_type RoamadomeControl::write(
     } else if (serialHandler_->sendCommand(command.command)) {
       {
         std::lock_guard<std::mutex> lock(sendQueue_mutex_);
-        activeSendQueueCommand_ = command;
-        sendQueueCommandActive_ = true;
-        sendQueueStage_ = SendQueueStage::WAIT_WRITE_SETTINGS;
-        sendQueueStageStartTime_ = std::chrono::steady_clock::now();
+        sendQueueStageStartTime_ = std::chrono::steady_clock::now();  // ack timeout from the send
       }
-
       RCLCPP_INFO(logger_, "Sent ack-tracked command '%s' (%s)",
         command.command.c_str(), command.label.c_str());
     } else {
+      {
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+        sendQueueCommandActive_ = false;
+        sendQueueStage_ = SendQueueStage::IDLE;
+      }
       RCLCPP_WARN(logger_, "Failed ack-tracked command '%s' (%s)",
         command.command.c_str(), command.label.c_str());
     }
@@ -1521,7 +1538,7 @@ hardware_interface::return_type RoamadomeControl::write(
     uint32_t target_degrees = normalizeAngleDegrees(cmd_position_);
 
     // Only send if position changed significantly (avoid redundant commands)
-    if (lastSentPosition_ < 0 || std::fabs(cmd_position_ - lastSentPosition_) > 0.01) {
+    if (std::isnan(lastSentPosition_) || std::fabs(cmd_position_ - lastSentPosition_) > 0.01) {
       if (sendPositionCommand(target_degrees)) {
         lastSentPosition_ = cmd_position_;
         RCLCPP_DEBUG(logger_, "Sent position command: %u°", target_degrees);
@@ -1532,7 +1549,7 @@ hardware_interface::return_type RoamadomeControl::write(
     int32_t target_percentage = velocityToPercentage(cmd_velocity_);
 
     // Only send if velocity changed significantly (avoid redundant commands)
-    if (std::fabs(cmd_velocity_ - lastSentVelocity_) > 0.01) {
+    if (std::isnan(lastSentVelocity_) || std::fabs(cmd_velocity_ - lastSentVelocity_) > 0.01) {
       if (sendVelocityCommand(target_percentage)) {
         lastSentVelocity_ = cmd_velocity_;
         RCLCPP_DEBUG(logger_, "Sent velocity command: %d%%", target_percentage);
@@ -1609,6 +1626,17 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
     sendStopCommand();
   }
 
+  if (new_mode == CommandMode::VELOCITY && currentMode_ != CommandMode::VELOCITY) {
+    // :DPR0 has been sent (or nothing was commanded): the first non-zero velocity
+    // command is sent, a command of 0 is not re-sent.
+    cmd_velocity_ = 0.0;
+    lastSentVelocity_ = 0.0;
+  }
+  if (new_mode != CommandMode::IDLE && firmwareMoveOutstanding_.load()) {
+    RCLCPP_WARN(logger_,
+      "A firmware position move is still outstanding; it cannot be cancelled from the host and "
+      "resumes after any :DPR0 until the firmware reports REACHED TARGET or a timeout");
+  }
   if (new_mode == CommandMode::POSITION && currentMode_ != CommandMode::POSITION) {
     // A position controller starts with whatever the command interface holds
     // (0 unless it wrote first), which used to send the dome to 0 degrees on
@@ -1679,7 +1707,11 @@ bool RoamadomeControl::sendPositionCommand(uint32_t degrees)
 
   // Format: :DPA<degrees> where degrees is 0-359
   std::string command = buildCommand(":DPA", degrees);
-  return serialHandler_->sendCommand(command);
+  if (!serialHandler_->sendCommand(command)) {
+    return false;
+  }
+  firmwareMoveOutstanding_.store(true);
+  return true;
 }
 
 bool RoamadomeControl::sendVelocityCommand(int32_t percentage)
@@ -1765,6 +1797,13 @@ void RoamadomeControl::handleBenchDrive(
         " deg is active; release it with percent 0 once the dome is at rest; bench drive rejected";
       return;
     }
+    if (percent != 0 && firmwareMoveOutstanding_.load()) {
+      // A released or controller move the firmware has not finished: a drive would
+      // override it and the stop would restart it.
+      response->message = "a firmware position move is still outstanding (no REACHED TARGET or "
+        "timeout yet); wait for it to finish; bench drive rejected";
+      return;
+    }
     if (!benchActive_ && percent == 0 && benchLastSentPercent_ == 0 &&
       lastCommandedPercent_.load() == 0)
     {
@@ -1818,6 +1857,11 @@ void RoamadomeControl::handleBenchMove(
     if (benchActive_ && (benchPendingPercent_ != 0 || benchLastSentPercent_ != 0)) {
       response->message = "a bench drive is active (pending " +
         std::to_string(benchPendingPercent_) + "%); stop it (percent 0) first; bench move rejected";
+      return;
+    }
+    if (lastCommandedPercent_.load() != 0) {
+      response->message = "the dome is still commanded at " +
+        std::to_string(lastCommandedPercent_.load()) + "%; stop it first; bench move rejected";
       return;
     }
     kept_alive = benchMoveTarget_.has_value() && *benchMoveTarget_ == target && benchMoveSent_;
@@ -2007,20 +2051,27 @@ void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
 
   const ReportPlausibilityGate::Decision decision =
     plausibilityGate_.update(now_steady, static_cast<uint16_t>(degrees % 360));
-  if (decision.held || decision.rejected || decision.confirmed) {
+  if (decision.held || decision.rejected || decision.confirmed || decision.resynced) {
     std::lock_guard<std::mutex> lock(diagnostics_mutex_);
     diagnosticsState_.reports_held = plausibilityGate_.heldCount();
     diagnosticsState_.reports_rejected = plausibilityGate_.rejectedCount();
     diagnosticsState_.jumps_confirmed = plausibilityGate_.confirmedCount();
+    diagnosticsState_.gate_resyncs = plausibilityGate_.resyncCount();
     if (decision.rejected) {
       diagnosticsState_.last_report_rejected = now_steady;
     }
   }
   if (decision.rejected) {
-    RCLCPP_WARN(logger_,
+    RCLCPP_WARN_THROTTLE(logger_, throttleClock_, 1000,
       "Rejected implausible position report %u deg (the next report, %u deg, disagreed with it; "
       "%u rejected since activation)", decision.dropped.degrees, degrees % 360,
       plausibilityGate_.rejectedCount());
+  }
+  if (decision.resynced) {
+    RCLCPP_WARN(logger_,
+      "Position reports disagreed with the accepted history %u times in a row: accepting %u deg "
+      "as the new position (is max_plausible_deg_s below the dome's real speed?)",
+      ReportPlausibilityGate::kResyncAfter, degrees % 360);
   }
   if (decision.held) {
     RCLCPP_DEBUG(logger_, "Holding position report %u deg until the next one confirms it",
@@ -2086,7 +2137,12 @@ void RoamadomeControl::handleClassifiedLine(const std::string & raw_line)
 
   switch (line.kind) {
     case FirmwareLineKind::POSITION_TIMEOUT:
+      firmwareMoveOutstanding_.store(false);
       RCLCPP_WARN(logger_, "Firmware aborted the dome move: no position change within its timeout");
+      break;
+    case FirmwareLineKind::REACHED_TARGET:
+    case FirmwareLineKind::REACHED_HOME:
+      firmwareMoveOutstanding_.store(false);
       break;
     case FirmwareLineKind::READY:
       if (active) {

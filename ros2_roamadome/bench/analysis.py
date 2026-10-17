@@ -572,9 +572,39 @@ def analyze_sensor_sweep(run_info, rows):
         'same_cycle_pairs': sum(s['same_cycle_pairs'] for s in steps),
         'max_gap_s': max((s['max_gap_s'] for s in steps), default=0.0),
     }
+    # The plugin's plausibility gate (max_plausible_deg_s) drops a misread before
+    # it reaches telemetry, so its counters over the sweep are part of the verdict.
+    gate = gate_counters_delta(run_info.get('sensor_diagnostics_before'),
+                               run_info.get('sensor_diagnostics_after'))
+    result['plugin_gate'] = gate
     result['suggested_pass'] = (bool(steps) and result['totals']['jumps'] == 0 and
-                                result['totals']['reversals'] == 0)
+                                result['totals']['reversals'] == 0 and
+                                (gate['reports_rejected'] or 0) == 0 and
+                                (gate['gate_resyncs'] or 0) == 0)
     return result
+
+
+GATE_COUNTERS = ('reports_held', 'reports_rejected', 'jumps_confirmed', 'gate_resyncs')
+
+
+def gate_counters_delta(before, after):
+    """
+    Change in the plugin's plausibility-gate counters over a sweep.
+
+    ``before`` and ``after`` are the ``roamadome: sensor`` value dicts the node
+    saved; a counter missing on either side (older plugin, or no diagnostics
+    seen) gives None. ``known`` is False when nothing could be read.
+    """
+    out = collections.OrderedDict()
+    known = False
+    for key in GATE_COUNTERS:
+        try:
+            out[key] = int((after or {})[key]) - int((before or {})[key])
+            known = True
+        except (KeyError, TypeError, ValueError):
+            out[key] = None
+    out['known'] = known
+    return out
 
 
 def _direction_fit(summaries, direction, angle_sign):
@@ -768,6 +798,14 @@ def summarize_stop_step(rows, meta, config):
         speed = NAN
     velocities = trailing_velocities(times, unwrapped, STOP_VELOCITY_WINDOW_S)
     last_moving = _last_moving_time(times, velocities, stopped_deg_s, t_stop)
+    # A pass through 0 deg adds the dead zone the controller skips there (about
+    # 9 deg) to the apparent travel: flag it for the speed window and the coast.
+    summary['pre_stop_crosses_zero'] = any(
+        crosses_zero(degrees[i - 1], shortest_delta(degrees[i - 1], degrees[i]))
+        for i in pre[1:] + [i_stop] if i >= 1)
+    summary['coast_crosses_zero'] = any(
+        crosses_zero(degrees[i - 1], shortest_delta(degrees[i - 1], degrees[i]))
+        for i in range(i_stop + 1, len(degrees)))
     summary['stop_found'] = True
     summary['t_stop'] = t_stop
     summary['speed_before_stop_deg_s'] = abs(speed) if _finite(speed) else NAN
@@ -808,6 +846,9 @@ def summarize_move_step(rows, meta, config):
     summary['start_deg'] = meta.get('start_deg')
     summary['target_deg'] = target
     summary['delta_deg'] = delta
+    # The controller never reports 356..3 deg, so a rest error against a target
+    # there is inflated by the dead zone.
+    summary['target_in_dead_zone'] = target >= 356 or target <= 3
     summary['samples'] = len(rows)
     summary['end_reason'] = meta.get('end_reason')
     summary['settled'] = meta.get('settled')
@@ -871,8 +912,14 @@ def analyze_position_sweep(run_info, rows):
     result['settings'] = settings
 
     curve = collections.OrderedDict()
-    usable = [s for s in stops if s.get('stop_found') and _finite(s['speed_before_stop_deg_s'])]
+    # Only steps that ran their full time and coasted to rest carry a valid distance.
+    usable = [s for s in stops if s.get('stop_found') and _finite(s['speed_before_stop_deg_s'])
+              and s.get('end_reason') == 'completed' and s.get('settled') is True]
     curve['steps'] = stops
+    curve['fit_steps'] = [s['index'] for s in usable]
+    curve['fit_steps_crossing_zero'] = [s['index'] for s in usable if
+                                        s.get('pre_stop_crosses_zero') or
+                                        s.get('coast_crosses_zero')]
     curve['fit'] = fit_line([s['speed_before_stop_deg_s'] for s in usable],
                             [s['stop_distance_deg'] for s in usable])
     for direction in (1, -1):

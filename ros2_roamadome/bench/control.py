@@ -210,14 +210,19 @@ def validate_percents(name, values):
 
 
 def validate_moves(name, values):
-    """Errors for a move list: non-zero integers in -359..359, at least one."""
+    """
+    Errors for a move list: non-zero integers in -179..179, at least one.
+
+    The firmware takes the short way round, so a move of 180 deg or more would
+    not travel in the direction of its sign and the analysis could not score it.
+    """
     errors = []
     values = list(values or [])
     if not values:
         return ['%s is empty' % name]
     for v in values:
-        if isinstance(v, bool) or not isinstance(v, int) or v == 0 or not -359 <= v <= 359:
-            errors.append('%s: %r is not a non-zero integer in -359..359' % (name, v))
+        if isinstance(v, bool) or not isinstance(v, int) or v == 0 or not -179 <= v <= 179:
+            errors.append('%s: %r is not a non-zero integer in -179..179' % (name, v))
     return errors
 
 
@@ -293,16 +298,17 @@ def settings_ack_state(baseline, current, writes):
     return 'waiting'
 
 
-def move_outcome(before, after):
+def move_outcome(before, after, fresh=True, move_age_s=None):
     """
     Return what the firmware reported for one bench move.
 
     ``before`` and ``after`` are the ``roamadome: motion`` value dicts before the
-    move and after standstill. Returns ``position_timeouts`` (new firmware
-    position timeouts during the move), ``reached_target_deg`` (the angle of a
-    REACHED TARGET that completed
-    during the move, else None) and ``status_seen`` (False when no fresh status
-    arrived, in which case the other two are unknown and None).
+    move and after standstill; ``fresh`` says whether ``after`` was published after
+    the standstill, and ``move_age_s`` how long before ``after`` the move was
+    commanded. Returns ``position_timeouts`` (new firmware position timeouts
+    during the move), ``reached_target_deg`` (the angle of a REACHED TARGET that
+    completed during this move, else None) and ``status_seen`` (False when no
+    fresh status arrived, in which case the other two are unknown and None).
     """
     def count(values, key):
         try:
@@ -316,7 +322,7 @@ def move_outcome(before, after):
         except (TypeError, ValueError):
             return None
 
-    if not after or after is before:
+    if not after or not fresh:
         return {'status_seen': False, 'position_timeouts': None, 'reached_target_deg': None}
     timeouts_before = count(before or {}, 'position_timeouts')
     timeouts_after = count(after, 'position_timeouts')
@@ -327,8 +333,12 @@ def move_outcome(before, after):
     before_deg = (before or {}).get('last_target_reached_deg')
     after_deg = after.get('last_target_reached_deg')
     completed_age = age(after)
+    # REACHED TARGET counts only if it completed during this move: the status is
+    # published at 1 Hz, so allow one period of slack on the move's age.
+    during_move = (completed_age is not None and move_age_s is not None and
+                   0.0 <= completed_age <= move_age_s + 1.5)
     if after_deg not in (None, 'unknown') and (
-            after_deg != before_deg or (completed_age is not None and completed_age < 30.0)):
+            (after_deg != before_deg and (move_age_s is None or during_move)) or during_move):
         try:
             reached = int(after_deg)
         except ValueError:

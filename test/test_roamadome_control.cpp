@@ -189,6 +189,7 @@ protected:
     return controller_->perform_command_mode_switch({"dome_joint/position"}, {});
   }
   void setCommandPositionForTest(double radians) {controller_->cmd_position_ = radians;}
+  void setCommandVelocityForTest(double rad_s) {controller_->cmd_velocity_ = rad_s;}
   double commandPositionForTest() const {return controller_->cmd_position_;}
   astromech_msgs::srv::DomeBenchMove::Response benchMoveForTest(int degrees)
   {
@@ -3156,6 +3157,71 @@ TEST_F(RoamadomeControlTest, PositionReports_GateRejectsAGlitchAndConfirmsARealJ
   EXPECT_EQ(diagnosticsStateForTest().reports_rejected, 1u);
   // Every raw report was counted for the link status.
   EXPECT_EQ(diagnosticsStateForTest().position_reports, 7u);
+}
+
+TEST_F(BenchModeTest, BenchMove_OutstandingFirmwareMoveBlocksDrivesUntilReached)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_TRUE(benchMoveForTest(200).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA200", 1000));
+  // Released early (the client gave up): the firmware is still moving.
+  EXPECT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+  const auto drive = benchDriveForTest(20);
+  EXPECT_FALSE(drive.success);
+  EXPECT_NE(drive.message.find("still outstanding"), std::string::npos);
+  const auto result = setDeviceParametersForTest({rclcpp::Parameter("device.max_speed", 60)});
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("outstanding"), std::string::npos);
+  // A new move may retarget it.
+  EXPECT_TRUE(benchMoveForTest(210).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA210", 1000));
+  EXPECT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+
+  // The firmware reports the end of the move: drives are allowed again.
+  pty.writeText("REACHED TARGET: 205\n");
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  for (int cycle = 0; cycle < 6; ++cycle) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(controller_->read(now, rclcpp::Duration::from_seconds(0.02)),
+      hardware_interface::return_type::OK);
+  }
+  EXPECT_TRUE(benchDriveForTest(20).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR20", 1000));
+  EXPECT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+}
+
+TEST_F(BenchModeTest, VelocityModeSwitch_SendsFirstNonZeroCommandOnly)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPR0"), 0);   // 0 is not re-sent: the dome is stopped
+  setCommandVelocityForTest(1.0);          // 1 rad/s of 3.14 -> 32 %
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR32", 1000));
+  setCommandVelocityForTest(0.0);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
 }
 
 }  // namespace ros2_roamadome
