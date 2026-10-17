@@ -14,7 +14,6 @@ find_package(ament_cmake_python REQUIRED)
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 find_package(hardware_interface REQUIRED)
-find_package(controller_manager REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -41,7 +40,6 @@ target_compile_definitions(ros2_roamadome PRIVATE "ros2_roamadome_BUILDING_LIBRA
 
 ament_target_dependencies(ros2_roamadome PUBLIC
   hardware_interface
-  controller_manager
   rclcpp
   pluginlib
   std_srvs
@@ -173,7 +171,6 @@ ament_export_targets(
 )
 ament_export_dependencies(
   hardware_interface
-  controller_manager
   rclcpp
   pluginlib
   std_srvs
