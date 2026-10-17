@@ -170,3 +170,49 @@ time window. Same settings, same defaults, run directory
   `0.22 s x v + 17 deg` (R squared 0.66), differs from the 20:26 run's `0.41 s x v - 14`
   because the clamped steps all sit at one speed with 62 to 74 deg of scatter; the curve
   needs SpeedTarget 100 to be meaningful, as noted above.
+
+## SpeedTarget back to 100 (21:39, `2026-10-16-speedtarget-100-position.json` and `-speed-operating.json`)
+
+`ros2 param set /roamadome device.speed_target 100` (readback 100, one settings ack, no
+timeout), then the default position sweep and an operating-settings speed sweep
+(`speed_sweep.raw_motor` false: MaxSpeed 80, MinSpeed 32, SpeedTarget 100, Scaling off), run
+directories `~/dome_bench/speedtarget100/20261016-213926-position` and `20261016-214116-speed`.
+
+**Position sweep** (status complete, 12/12 moves reached, 0 jumps, 3064 samples, largest gap
+67 ms). The stop curve now covers the full range, 57 to 394 deg/s: `d = 0.41 s x v - 14 deg`
+with R squared 0.93 (17 deg from 57 deg/s, 50 from 183, 74 to 90 from 258, 143 to 162 from
+367 to 394; five of the eight steps crossed 0 deg somewhere, which inflates them by up to
+9 deg). The afternoon's direct-serial curve was `0.47 s x v - 18 deg`. Moves: +7, -10, +7, -8,
++1, -10, +4, -5, +2, -11, +3, -7 (mean |e| 6.3, max 11; this time the angle-decreasing moves,
+ending at 0 to 31 deg, were the worse ones), peak 55 to 106 deg/s, arrival 33 to 93 deg/s.
+**Position-move behaviour is unchanged by SpeedTarget**, as the per-move speed probe predicted:
+the three runs at 60 gave mean |e| 4.9, 7.0 and (per-move 100) 6.0, this one 6.3.
+
+**Speed sweep at the operating settings** (status complete, 0 jumps, 4223 samples):
+
+| direction | `min_percent` | 100 % (rad/s) | fit k (rad/s per %) | p0 (%) | R squared |
+|---|---|---|---|---|---|
+| positive percent (angle decreasing) | 32 (bracketed) | 6.79 | 0.0847 | 18.2 | 0.998 |
+| negative percent (angle increasing) | 32 (bracketed) | 6.58 | 0.0851 | 18.3 | 0.994 |
+
+Phase 7 inputs from this run (`phase7` in the JSON): `max_speed_rad_per_sec` 6.58 (the lower
+measured 100 % rate; the fit value is 6.84), `positive_velocity` percent_sign -1, k 11.94 % per
+rad/s, p0 18.3, min_percent 32; `negative_velocity` percent_sign +1, k 11.75, p0 18.2,
+min_percent 32. Compared with the calibration reference (SpeedTarget 100 then too, before the
+MinSpeed change): the same top speed, k within 4 %, p0 lower by 2 to 4 % because the
+32 % floor now zeroes everything below it. Asymmetry 1.018.
+
+**Velocity controller.** `dome_controller` with a 2.5 rad/s command (80 % through the plugin's
+default 3.14 rad/s linear mapping) ran the dome at 5.06 rad/s: the full range is back
+(3.5 rad/s was the ceiling at SpeedTarget 60).
+
+**Incident (operator error, not the robot).** The validation script killed "the bench node"
+by a `pgrep -f` pattern that also matched the shell the script itself had been started from;
+that shell's cleanup took the zenoh router down twenty seconds into the velocity-controller
+check. Every `ros2` CLI call afterwards hung and the zero command never reached the
+controller: the dome kept turning at 80 % for about two minutes until `stop_all.sh` sent
+SIGINT to the controller manager, whose deactivation `:DPR0` stopped it (confirmed over direct
+serial: angle steady). Lessons: the velocity path has no watchdog of its own, so a human at the
+robot and a stop that does not depend on the ROS graph (SIGINT to the controller manager, or
+`:DPR0` over the serial port) are the safety net; never run a velocity command from a script
+whose stop relies on the CLI; and kill bench nodes by an exact pid, never by a pattern.

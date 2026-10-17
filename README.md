@@ -372,18 +372,22 @@ Worked example: this is exactly the situation on the bench robot.
   0-crossing wrap allowance and the plugin's plausibility gate were validated on the dome
   ([docs/bench_results/2026-10-16-position-sweep-service.md](docs/bench_results/2026-10-16-position-sweep-service.md)).
 
-**The 2026-10-16 with-dome report is the calibration reference. These are the values to
-configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 32, SpeedTarget 60, DecelerationScale 250, Fudge 5, Scaling off;
-`MinSpeed` was raised from 15 to 32 and the position-move settings tuned on 2026-10-16
-after this run, see the report's "MinSpeed follow-up" and "Position-move tuning" sections):
+**The calibration state is MaxSpeed 80, MinSpeed 32, SpeedTarget 100, DecelerationScale 250,
+Fudge 5, Scaling off** (new plate, dome installed; `MinSpeed` raised from 15 to 32 and the
+position-move settings tuned on 2026-10-16, SpeedTarget set to 60 during that tuning and
+back to 100 the same evening once the per-move speed probe showed it does not affect the
+moves). **The values to configure** come from the operating-settings speed sweep at exactly
+these settings (2026-10-16 21:41, "SpeedTarget back to 100" in
+[the position sweep report](docs/bench_results/2026-10-16-position-sweep-service.md); the
+earlier with-dome report, taken at MinSpeed 15, agrees within 4 % on k and on the top speed):
 
-- `max_speed_rad_per_sec` **6.56**: the lower measured 100 % rate, from -100 % in the
-  operating-settings run. The raw run measured 6.70, and the JSON's fit value is 6.88.
-- `positive_velocity`: `percent_sign` -1, `k_percent_per_rad_s` **11.47**, `p0_percent`
-  **20.45**, `min_percent` **27**.
-- `negative_velocity`: `percent_sign` +1, `k_percent_per_rad_s` **11.33**, `p0_percent`
-  **22.08**, `min_percent` **32**.
-- If only one parameter set is supported: k 11.47, p0 22.08, `min_percent` 32.
+- `max_speed_rad_per_sec` **6.58**: the lower measured 100 % rate (-100 %); the fit value
+  is 6.84.
+- `positive_velocity`: `percent_sign` -1, `k_percent_per_rad_s` **11.94**, `p0_percent`
+  **18.3**, `min_percent` **32**.
+- `negative_velocity`: `percent_sign` +1, `k_percent_per_rad_s` **11.75**, `p0_percent`
+  **18.2**, `min_percent` **32**.
+- If only one parameter set is supported: k 11.9, p0 18.3, `min_percent` 32.
 
 `min_percent` is the larger of the raw and operating-settings runs per direction (see (b)).
 
@@ -590,8 +594,8 @@ firmware menu or `#DP` commands, invalidates the fit: re-run (b) to (d).
 **`SpeedTarget` caps `:DPR` as well as position moves** (the firmware clamps the rotate
 percent to it): the calibration reference above was measured at SpeedTarget 100, but the
 position-move tuning in (g) set it to 60, at which the velocity path tops out at about
-3.5 rad/s (200 deg/s, 2026-10-16 position sweep). **Set `device.speed_target` back to 100
-for the velocity controller: it does not change the position moves.** A direct probe
+3.5 rad/s (200 deg/s, 2026-10-16 position sweep). **`device.speed_target` is back at 100
+since 2026-10-16 21:39; it does not change the position moves.** A direct probe
 (2026-10-16, [the position sweep report](docs/bench_results/2026-10-16-position-sweep-service.md))
 sent 150 deg moves at a per-move speed of 0.40, 0.60 and 1.00 (`:DPA<deg>,<percent>`,
 which sets the firmware's target speed for that move exactly as `SpeedTarget` would) and
@@ -676,8 +680,10 @@ below 30 the approach stalls at the ring's tight spots (MinSpeed 25: within 4 de
 when it completes, but 2 of 18 moves stalled; 28: within 8, 1 stall in 18; 30:
 within 8, no stalls; 32: within 6 typical, one 12 deg outlier in 18, no stalls).
 Fudge 3 adds about 3 deg of overshoot on short moves, which arrive at 60-75 deg/s
-regardless of the floor. `SpeedTarget` 60, `DecelerationScale` 250 and `Fudge` 5 with
-`MinSpeed` 32 are now set (2026-10-16) and are the calibration state. Getting below
+regardless of the floor. `DecelerationScale` 250 and `Fudge` 5 with `MinSpeed` 32 are now set (2026-10-16) and
+are the calibration state; `SpeedTarget` went from 60 back to 100 the same evening (it
+does not change the moves, see (e)): the position sweep at 100 gave +7, -10, +7, -8, +1,
+-10, +4, -5, +2, -11, +3, -7. Getting below
 this needs a shorter stopping distance (a configurable Sabertooth ramp in the
 firmware) or a host-side final nudge, not more fudge tuning.
 Redo this step after any change to the dome's mass or friction, or to `MinSpeed`.
