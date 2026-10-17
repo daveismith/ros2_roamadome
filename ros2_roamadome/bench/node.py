@@ -13,12 +13,13 @@
 # limitations under the License.
 
 """
-The ``roamadome_bench`` node: sensor sweep and speed sweep for the dome.
+The ``roamadome_bench`` node: sensor, speed and position sweeps for the dome.
 
-See docs/dome_diagnostics_plan.md sections 5.4, 6 (phase 5) and 7. The node
-drives the dome only through the hardware node's ``bench/drive`` service,
-reads ``telemetry`` and changes ``device.*`` parameters through the hardware
-node's parameter services. The hardware node is found by name through the
+See docs/dome_diagnostics_plan.md sections 5.4, 6 (phase 5) and 7, and the
+README's "Position-move tuning" for the position sweep. The node drives the
+dome only through the hardware node's ``bench/drive`` and ``bench/move``
+services, reads ``telemetry`` and changes ``device.*`` parameters through the
+hardware node's parameter services. The hardware node is found by name through the
 ``hardware_node`` parameter (default ``roamadome``).
 
 Threads: the executor (several threads) runs the service callbacks, the
@@ -40,6 +41,7 @@ import traceback
 
 from astromech_msgs.msg import DomeTelemetry
 from astromech_msgs.srv import DomeBenchDrive
+from astromech_msgs.srv import DomeBenchMove
 from diagnostic_msgs.msg import DiagnosticArray
 from rcl_interfaces.msg import SetParametersResult
 from rcl_interfaces.srv import GetParameters
@@ -64,13 +66,15 @@ from . import control
 # Settings the bench may change, saved to settings_before.json (plan 6, phase 5 step 1).
 SAVED_SETTINGS = ('max_speed', 'min_speed', 'speed_target', 'scaling')
 # Recorded for context only; never written (Inverted, HomePos, AutoSafety are off limits).
-CONTEXT_SETTINGS = ('speed_home', 'acceleration_scale', 'deceleration_scale', 'timeout',
-                    'inverted', 'home_pos', 'auto_safety')
+CONTEXT_SETTINGS = ('speed_home', 'acceleration_scale', 'deceleration_scale', 'fudge',
+                    'timeout', 'inverted', 'home_pos', 'auto_safety')
 # raw_motor: max speed 100, target speed 100, scaling off (plan 5.4).
 RAW_MOTOR_SETTINGS = (('max_speed', 100), ('speed_target', 100), ('scaling', False))
 
 TELEMETRY_TIMEOUT_S = 1.0      # dropout during a sweep aborts it
 STANDSTILL_TIMEOUT_S = 5.0     # plan: wait for standstill or 5 s
+STOP_SETTLE_TIMEOUT_S = 8.0    # position sweep: coasting to rest after a stop
+MOTION_STATUS_WAIT_S = 2.5     # wait for the 1 Hz motion status after a move
 SERVICE_TIMEOUT_S = control.SERVICE_TIMEOUT_S  # any single service call
 SETTING_READBACK_TIMEOUT_S = 5.0
 SETTING_RETRY_S = 10.0         # retry a write the plugin refuses while the dome is stopping
@@ -113,6 +117,7 @@ class BenchNode(Node):
         self.declare_parameter('sensor_sweep.duration_s', 30.0)
         self.declare_parameter('sensor_sweep.settle_s', 2.0)
         self.declare_parameter('sensor_sweep.max_plausible_deg_s', 720.0)
+        self.declare_parameter('sensor_sweep.wrap_allowance_deg', 10.0)
         self.declare_parameter('speed_sweep.percents',
                                [10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100])
         self.declare_parameter('speed_sweep.settle_s', 2.0)
@@ -121,6 +126,13 @@ class BenchNode(Node):
         self.declare_parameter('speed_sweep.stall_deg_s', 3.0)
         self.declare_parameter('speed_sweep.stall_s', 2.0)
         self.declare_parameter('speed_sweep.raw_motor', True)
+        self.declare_parameter('position_sweep.stop_percents', [35, 50, 70, 100])
+        self.declare_parameter('position_sweep.stop_run_s', 5.0)
+        self.declare_parameter('position_sweep.moves_deg',
+                               [150, -150, 40, -40, 90, -90, 20, -20, 120, -120, 60, -60])
+        self.declare_parameter('position_sweep.settle_s', 1.2)
+        self.declare_parameter('position_sweep.move_timeout_s', 12.0)
+        self.declare_parameter('position_sweep.stopped_deg_s', 5.0)
 
         errors = control.validate_config(lambda name: self.get_parameter(name).value)
         if errors:
@@ -132,7 +144,8 @@ class BenchNode(Node):
 
         self._lock = threading.Lock()          # status, latest telemetry and diagnostics
         self._claim = control.SweepClaim()     # one sweep at a time, claimed atomically
-        self._gate = control.DriveGate(self._call_drive)  # serialises bench/drive calls
+        # Serialises bench/drive and bench/move calls; one at a time.
+        self._gate = control.DriveGate(self._call_drive, self._call_move)
         self._abort_event = threading.Event()
         self._force_event = threading.Event()  # second signal: stop waiting for cleanup
         self._abort_reason = None
@@ -142,6 +155,7 @@ class BenchNode(Node):
         self._latest_rx = 0.0
         self._sensor_diag = None
         self._motion_counters = None           # (pending, acks, timeouts) from /diagnostics
+        self._motion_values = {}               # every value of the latest roamadome: motion
         self._motion_stamp = 0.0               # header stamp of that diagnostics message
         self._status = {'state': 'idle'}
         self._last_result = None
@@ -156,6 +170,8 @@ class BenchNode(Node):
                                  callback_group=self._group)
         self._drive_client = self.create_client(
             DomeBenchDrive, self._hw + '/bench/drive', callback_group=self._group)
+        self._move_client = self.create_client(
+            DomeBenchMove, self._hw + '/bench/move', callback_group=self._group)
         self._get_client = self.create_client(
             GetParameters, self._hw + '/get_parameters', callback_group=self._group)
         self._set_client = self.create_client(
@@ -165,6 +181,9 @@ class BenchNode(Node):
                             callback_group=self._group)
         self.create_service(Trigger, '~/start_speed_sweep',
                             lambda req, res: self._on_start('speed', res),
+                            callback_group=self._group)
+        self.create_service(Trigger, '~/start_position_sweep',
+                            lambda req, res: self._on_start('position', res),
                             callback_group=self._group)
         self.create_service(Trigger, '~/abort', self._on_abort, callback_group=self._group)
         self._status_pub = self.create_publisher(String, '~/status', 10)
@@ -209,10 +228,11 @@ class BenchNode(Node):
     def _on_diagnostics(self, msg):
         for status in msg.status:
             if status.name == 'roamadome: motion':
-                counters = control.parse_settings_counters(
-                    {kv.key: kv.value for kv in status.values})
-                if counters is not None:
-                    with self._lock:
+                values = {kv.key: kv.value for kv in status.values}
+                counters = control.parse_settings_counters(values)
+                with self._lock:
+                    self._motion_values = values
+                    if counters is not None:
                         self._motion_counters = counters
                         self._motion_stamp = _stamp_seconds(msg.header.stamp)
             if status.name == 'roamadome: sensor':
@@ -275,9 +295,11 @@ class BenchNode(Node):
             raise ValueError('hardware is not idle (command_mode %d, commanded %d%%); a '
                              'controller or another bench client holds the dome'
                              % (latest.command_mode, latest.commanded_percent))
-        for client, name in ((self._drive_client, 'bench/drive'),
-                             (self._get_client, 'get_parameters'),
-                             (self._set_client, 'set_parameters')):
+        clients = [(self._drive_client, 'bench/drive'), (self._get_client, 'get_parameters'),
+                   (self._set_client, 'set_parameters')]
+        if sweep == 'position':
+            clients.append((self._move_client, 'bench/move'))
+        for client, name in clients:
             if not client.service_is_ready():
                 raise ValueError('%s/%s is not available (bench mode off?)' % (self._hw, name))
         params = self._read_sweep_params(sweep)
@@ -376,6 +398,18 @@ class BenchNode(Node):
             return False, 'no response from %s/bench/drive within %.1f s' % (self._hw, timeout)
         return bool(response.success), response.message
 
+    def _call_move(self, target_deg, timeout=SERVICE_TIMEOUT_S):
+        """One bench/move call; only DriveGate calls this."""
+        if not self._move_client.service_is_ready():
+            return False, '%s/bench/move is not available' % self._hw
+        request = DomeBenchMove.Request()
+        request.target_deg = int(target_deg) % 360
+        response = self._wait_future(self._move_client,
+                                     self._move_client.call_async(request), timeout)
+        if response is None:
+            return False, 'no response from %s/bench/move within %.1f s' % (self._hw, timeout)
+        return bool(response.success), response.message
+
     def _send_percent(self, percent):
         """Command a percent; refused for non-zero once the sweep is stopping."""
         return self._gate.send(percent)
@@ -392,6 +426,19 @@ class BenchNode(Node):
                 time.sleep(0.2)  # the raw_motor writes are still being acked
                 continue
             raise SweepAbort('bench drive %d%% rejected: %s' % (percent, message))
+
+    def _move(self, target_deg, settings_retry_s=0.0):
+        """Command a bench position move; a rejection aborts the sweep."""
+        deadline = time.monotonic() + settings_retry_s
+        while True:
+            ok, message = self._gate.move(target_deg)
+            if ok:
+                return
+            if ('settings write is in flight' in message and time.monotonic() < deadline and
+                    not self._abort_event.is_set()):
+                time.sleep(0.2)
+                continue
+            raise SweepAbort('bench move to %d deg rejected: %s' % (target_deg, message))
 
     def _get_params(self, names):
         request = GetParameters.Request()
@@ -521,27 +568,35 @@ class BenchNode(Node):
         errors = control.validate_config(get)
         if errors:
             raise ValueError('invalid parameters: ' + '; '.join(errors))
-        prefix = 'sensor_sweep.' if sweep == 'sensor' else 'speed_sweep.'
-        percents = [int(p) for p in get(prefix + 'percents')]
         params = {
             'output_dir': os.path.expanduser(str(get('output_dir'))),
-            'percents': percents,
-            'raw_motor': bool(get('speed_sweep.raw_motor')),
+            # The position sweep measures the firmware's own moves at the operating settings.
+            'raw_motor': bool(get('speed_sweep.raw_motor')) if sweep != 'position' else False,
             'heartbeat_period_s': self._heartbeat_period,
             'velocity_window_s': float(get('velocity_window_s')),
             'stall_deg_s': float(get('speed_sweep.stall_deg_s')),
             'stall_s': float(get('speed_sweep.stall_s')),
             'max_plausible_deg_s': float(get('sensor_sweep.max_plausible_deg_s')),
             'max_plausible_source': 'parameter sensor_sweep.max_plausible_deg_s',
+            'wrap_allowance_deg': float(get('sensor_sweep.wrap_allowance_deg')),
             'same_cycle_dt_s': analysis.SAME_CYCLE_DT_S,
         }
         if sweep == 'sensor':
+            params['percents'] = [int(p) for p in get('sensor_sweep.percents')]
             params['settle_s'] = float(get('sensor_sweep.settle_s'))
             params['duration_s'] = float(get('sensor_sweep.duration_s'))
-        else:
+        elif sweep == 'speed':
+            params['percents'] = [int(p) for p in get('speed_sweep.percents')]
             params['settle_s'] = float(get('speed_sweep.settle_s'))
             params['min_measure_s'] = float(get('speed_sweep.min_measure_s'))
             params['max_measure_s'] = float(get('speed_sweep.max_measure_s'))
+        else:
+            params['stop_percents'] = [int(p) for p in get('position_sweep.stop_percents')]
+            params['stop_run_s'] = float(get('position_sweep.stop_run_s'))
+            params['moves_deg'] = [int(d) for d in get('position_sweep.moves_deg')]
+            params['settle_s'] = float(get('position_sweep.settle_s'))
+            params['move_timeout_s'] = float(get('position_sweep.move_timeout_s'))
+            params['stopped_deg_s'] = float(get('position_sweep.stopped_deg_s'))
         return params
 
     def _make_run_dir(self, output_dir, sweep):
@@ -598,7 +653,10 @@ class BenchNode(Node):
                 last_t, last_deg = step['last']
                 d = analysis.shortest_delta(last_deg, sample.position_deg)
                 step['unwrapped'] += d
-                if analysis.is_jump(d, t - last_t, self._params['max_plausible_deg_s']):
+                if analysis.is_jump(d, t - last_t, self._params['max_plausible_deg_s'],
+                                    analysis.SAME_CYCLE_DT_S,
+                                    self._params.get('wrap_allowance_deg', 0.0),
+                                    analysis.crosses_zero(last_deg, d)):
                     self._counts['jumps'] += 1
             else:
                 step['unwrapped'] = float(sample.position_deg)
@@ -721,6 +779,174 @@ class BenchNode(Node):
                                       self._revolution_measure)
                 entries[direction].append((probe, meta['end_reason'] == 'completed'))
 
+    # ------------------------------------------------------------------
+    # Position sweep (README "Position-move tuning")
+    # ------------------------------------------------------------------
+
+    def _wait_still(self, still_s, max_s, strict=True, moved_from=None, min_move_deg=2):
+        """
+        Wait until the reported angle has not changed for ``still_s`` seconds.
+
+        Keeps draining telemetry into the current step. Returns ``'still'`` at
+        standstill, ``'timeout'`` after ``max_s``. With ``moved_from`` (a start
+        angle) standstill only counts once the dome has moved at least
+        ``min_move_deg`` away from it, so a move that has not started yet (the
+        firmware still queueing it) is not mistaken for a finished one;
+        ``'no_motion'`` is returned if it never moves. Position-based, unlike
+        ``_wait_standstill``, so it also ends a firmware move, during which
+        ``commanded_percent`` stays 0.
+        """
+        start = time.monotonic()
+        ref = None
+        last_change = start
+        moved = moved_from is None
+        while time.monotonic() - start < max_s:
+            self._drain()
+            if strict:
+                self._check_abort()
+                self._check_link()
+            msg, rx = self._latest()
+            if msg is not None and rx >= start:
+                deg = int(msg.position_deg)
+                if not moved and abs(analysis.shortest_delta(moved_from, deg)) >= min_move_deg:
+                    moved = True
+                if ref is None or deg != ref:
+                    ref = deg
+                    last_change = time.monotonic()
+                elif moved and time.monotonic() - last_change >= still_s:
+                    return 'still'
+            time.sleep(LOOP_PERIOD_S)
+        return 'timeout' if moved else 'no_motion'
+
+    def _motion_status_values(self, after_wall=None, wait_s=0.0):
+        """
+        Latest roamadome: motion values with their stamp and freshness.
+
+        Returns ``(values, stamp, fresh)``; with ``after_wall`` it waits up to
+        ``wait_s`` for a status stamped after it, and ``fresh`` says whether one
+        arrived.
+        """
+        deadline = time.monotonic() + wait_s
+        while True:
+            with self._lock:
+                stamp = self._motion_stamp
+                values = dict(self._motion_values)
+            fresh = after_wall is None or stamp > after_wall
+            if fresh or time.monotonic() >= deadline:
+                return values, stamp, fresh
+            time.sleep(0.1)
+
+    def _begin_step(self, meta, phase, direction):
+        """Register a position-sweep step and start recording into it."""
+        self._steps.append(meta)
+        self._write_run_json('running')
+        self._drain()
+        self._step = {'index': meta['index'], 'direction': direction, 'phase': phase,
+                      'last': None, 'unwrapped': 0.0, 'times': [], 'unwrapped_list': [],
+                      'stalled': False,
+                      'stall': analysis.StallDetector(self._params['stall_deg_s'],
+                                                      self._params['stall_s'])}
+        self._set_status(phase=phase, step_index=meta['index'], kind=meta['kind'],
+                         percent=meta['percent'], direction=direction,
+                         step_started_mono=time.monotonic())
+
+    def _run_stop_step(self, percent):
+        """Steady ``percent`` for stop_run_s, then 0, recording the coast to standstill."""
+        p = self._params
+        index = len(self._steps)
+        direction = 1 if percent > 0 else -1
+        meta = {'index': index, 'kind': 'stop', 'percent': percent, 'direction': direction,
+                'end_reason': 'incomplete'}
+        self.get_logger().info('Step %d (stop): %d%% for %.1f s, then 0'
+                               % (index, percent, p['stop_run_s']))
+        self._check_abort()
+        first_drive = not self._driven_once
+        self._driven_once = True
+        self._drive(percent, SETTINGS_IN_FLIGHT_RETRY_S if first_drive else 0.0)
+        self._begin_step(meta, analysis.PHASE_RUN, direction)
+        try:
+            outcome = self._hold(lambda: p['stop_run_s'])
+            if outcome == 'stalled':
+                self._counts['stalls'] += 1
+                self.get_logger().warn('Step %d: %d%% stalled; stopping' % (index, percent))
+            self._drain()
+            self._step['phase'] = analysis.PHASE_COAST
+            self._set_status(phase=analysis.PHASE_COAST)
+            self._drive(0)
+            meta['t_stop_wall'] = time.time()
+            meta['settled'] = self._wait_still(p['settle_s'], STOP_SETTLE_TIMEOUT_S) == 'still'
+            meta['end_reason'] = 'completed' if outcome == 'done' else 'stalled'
+        finally:
+            self._drain()
+            self._step = None
+        self._wait_standstill(strict=True)
+        self._counts['steps_done'] += 1
+        self._write_run_json('running')
+        return meta
+
+    def _run_move_step(self, delta):
+        """One firmware position move of ``delta`` degrees from the current angle."""
+        p = self._params
+        index = len(self._steps)
+        direction = 1 if delta > 0 else -1
+        self._drain()
+        msg, _ = self._latest()
+        if msg is None:
+            raise SweepAbort('no telemetry before move %d' % index)
+        start = int(msg.position_deg)
+        target = (start + delta) % 360
+        meta = {'index': index, 'kind': 'move', 'percent': 0, 'direction': direction,
+                'start_deg': start, 'target_deg': target, 'delta_deg': delta,
+                'end_reason': 'incomplete'}
+        before, _, _ = self._motion_status_values()
+        self.get_logger().info('Step %d (move): %d -> %d deg (delta %+d)'
+                               % (index, start, target, delta))
+        self._check_abort()
+        first_drive = not self._driven_once
+        self._driven_once = True
+        self._move(target, SETTINGS_IN_FLIGHT_RETRY_S if first_drive else 0.0)
+        meta['t_move_wall'] = time.time()
+        self._begin_step(meta, analysis.PHASE_MOVE, direction)
+        try:
+            outcome = self._wait_still(p['settle_s'], p['move_timeout_s'], moved_from=start)
+            t_still = time.time()
+            meta['settled'] = outcome == 'still'
+            meta['end_reason'] = 'completed' if outcome == 'still' else outcome
+            if outcome != 'still':
+                self.get_logger().warn('Step %d: %s within %.0f s of the move' % (
+                    index, 'no standstill' if outcome == 'timeout' else 'no motion',
+                    p['move_timeout_s']))
+        finally:
+            self._drain()
+            self._step = None
+        # The firmware's own verdict (REACHED TARGET / position timeout) reaches the
+        # 1 Hz motion status a little later.
+        after, stamp, fresh = self._motion_status_values(after_wall=t_still,
+                                                         wait_s=MOTION_STATUS_WAIT_S)
+        meta['firmware'] = control.move_outcome(before, after, fresh,
+                                                stamp - meta['t_move_wall'])
+        self._set_status(phase='releasing')
+        self._drive(0)    # releases the bench claim; the move is over
+        self._wait_standstill(strict=True)
+        self._counts['steps_done'] += 1
+        self._write_run_json('running')
+        return meta
+
+    def _run_position_sweep(self):
+        speed_target = self._settings_before.get('speed_target')
+        over = [p for p in self._params['stop_percents']
+                if isinstance(speed_target, int) and p > speed_target]
+        if over:
+            self.get_logger().warn(
+                'Stop percents %s exceed device.speed_target (%d): the firmware clamps :DPR to '
+                'SpeedTarget, so those steps run at the same speed as %d %%' % (
+                    over, speed_target, speed_target))
+        for percent in self._params['stop_percents']:
+            for direction in (1, -1):
+                self._run_stop_step(percent * direction)
+        for delta in self._params['moves_deg']:
+            self._run_move_step(delta)
+
     def _resolve_sensor_thresholds(self):
         params = self._params
         highest = max(params['percents'])
@@ -758,6 +984,7 @@ class BenchNode(Node):
             'config': {k: v for k, v in self._params.items() if k != 'output_dir'},
             'steps': self._steps,
             'settings_before': self._settings_before,
+            'settings_context': self._settings_context,
             'settings_written': self._settings_written,
             'settings_restored': self._settings_restored,
             'raw_settings_firmware_acked': self._raw_settings_acked,
@@ -778,6 +1005,7 @@ class BenchNode(Node):
             'hardware_node': self._hw, 'time': _now_iso(), 'settings': saved,
             'context': context, 'restore_commands': restore})
         self._settings_before = saved
+        self._settings_context = context
         self.get_logger().info('Saved settings_before.json: %s' % saved)
 
     def _sweep_main(self, sweep, params, run_dir):
@@ -789,6 +1017,7 @@ class BenchNode(Node):
         self._step = None
         self._driven_once = False
         self._settings_before = {}
+        self._settings_context = {}
         self._settings_written = {}
         self._settings_restored = None
         self._settings_after = None
@@ -806,11 +1035,14 @@ class BenchNode(Node):
             self._save_settings_before()
             if sweep == 'sensor':
                 self._resolve_sensor_thresholds()
-            else:
+            elif sweep == 'speed':
                 min_speed = self._settings_before.get('min_speed', 0)
                 params['min_percent_known'] = {n: min_speed
                                                for n in analysis.DIRECTION_NAMES.values()}
                 params['min_percent_source'] = 'firmware MinSpeed (device.min_speed)'
+            else:
+                fudge = self._settings_context.get('fudge')
+                params['fudge_deg'] = int(fudge) if isinstance(fudge, int) else None
             self._write_run_json('running')
             self._check_abort()
             if params['raw_motor']:
@@ -826,8 +1058,10 @@ class BenchNode(Node):
             self._check_abort()
             if sweep == 'sensor':
                 self._run_sensor_sweep()
-            else:
+            elif sweep == 'speed':
                 self._run_speed_sweep()
+            else:
+                self._run_position_sweep()
             status = 'complete'
         except SweepAbort as exc:
             status, reason = 'aborted', str(exc)
@@ -848,6 +1082,12 @@ class BenchNode(Node):
         self._gate.begin_stopping()
         self._step = None
         self._set_status(state='stopping', phase='stopping')
+        if self._gate.move_target is not None:
+            # A firmware move cannot be cancelled; wait for it to end before the
+            # claim is released, so nothing else can drive the dome under it.
+            self.get_logger().warn('A bench move is in flight; waiting for it to finish')
+            self._wait_still(self._params.get('settle_s', 1.2),
+                             self._params.get('move_timeout_s', 12.0), strict=False)
         stopped = False
         message = ''
         for _ in range(3):

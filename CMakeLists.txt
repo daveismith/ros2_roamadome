@@ -115,6 +115,13 @@ if(BUILD_TESTING)
     $<INSTALL_INTERFACE:include>
   )
 
+  # Unit tests for the report plausibility gate (header-only, no ROS dependency)
+  ament_add_gtest(test_report_plausibility_gate test/test_report_plausibility_gate.cpp)
+  target_include_directories(test_report_plausibility_gate PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+
   # Unit tests for the firmware console line classifier
   ament_add_gtest(test_firmware_line_classifier test/test_firmware_line_classifier.cpp)
   target_include_directories(test_firmware_line_classifier PUBLIC

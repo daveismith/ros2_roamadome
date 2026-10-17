@@ -17,10 +17,12 @@ Dome bench analysis: pure functions over lists of tuples, no ROS dependency.
 
 Implements docs/dome_diagnostics_plan.md section 7: unwrap and regression
 velocity (7.1), jump, reversal and stall scoring (7.2) and the speed sweep
-summary with the per-direction affine fit (7.3), plus reading and writing the
-section 5.5 CSV and the result JSON. The node in ``node.py`` and the offline
-``roamadome_bench_report`` tool both compute results with
-:func:`analyze_run_dir`, so a saved run directory reproduces its JSON exactly.
+summary with the per-direction affine fit (7.3), plus the position sweep
+(stopping-distance curve and firmware position moves, README "Position-move
+tuning") and reading and writing the section 5.5 CSV and the result JSON. The
+node in ``node.py`` and the offline ``roamadome_bench_report`` tool both
+compute results with :func:`analyze_run_dir`, so a saved run directory
+reproduces its JSON exactly.
 
 Conventions:
 
@@ -46,6 +48,10 @@ Sample = collections.namedtuple('Sample', CSV_FIELDS)
 
 PHASE_SETTLE = 'settle'
 PHASE_MEASURE = 'measure'
+# Position sweep phases: steady run before a stop, coasting after it, a firmware move.
+PHASE_RUN = 'run'
+PHASE_COAST = 'coast'
+PHASE_MOVE = 'move'
 
 SAMPLES_CSV = 'samples.csv'
 RUN_JSON = 'run.json'
@@ -56,8 +62,16 @@ DIRECTION_NAMES = {1: 'positive_percent', -1: 'negative_percent'}
 
 # Minimum net displacement for a step to vote on the angle sign mapping (degrees).
 SIGN_VOTE_MIN_DEG = 10.0
-# Plan 7.2: a jump is |d| > max_plausible_deg_s * dt + JUMP_SLACK_DEG.
+# Plan 7.2: a jump is |d| > max_plausible_deg_s * dt + JUMP_SLACK_DEG, plus the
+# wrap allowance when the step crosses 0: the controller never reports 359 to
+# 2 deg, so every 0-crossing step is about 9 deg longer than the dome moved
+# (2026-10-16 with-dome report). Absent from an older run.json the allowance is 0.
 JUMP_SLACK_DEG = 2.0
+# Regression window for the stop-time and settle-time clocks of the position
+# sweep: shorter than the velocity window so the standstill is not smeared.
+STOP_VELOCITY_WINDOW_S = 0.25
+# Speed just before a stop is the slope over this long before the stop command.
+PRE_STOP_WINDOW_S = 0.3
 # Two report lines read in the same controller cycle are stamped microseconds apart
 # (measured 50-80 us), although the firmware sent them a report interval (28 ms) apart.
 # Pairs closer than this are "same-cycle" pairs and are not scored for jumps.
@@ -210,15 +224,30 @@ def find_stall(times, unwrapped_deg, stall_deg_s, stall_s):
     return None
 
 
-def is_jump(delta_deg, dt, max_plausible_deg_s, same_cycle_dt_s=SAME_CYCLE_DT_S):
-    """Plan 7.2 jump test for one pair; same-cycle pairs (dt < same_cycle_dt_s) never jump."""
+def crosses_zero(from_deg, delta_deg):
+    """Return True when the shortest step ``delta_deg`` from ``from_deg`` passes through 0."""
+    end = int(from_deg) % 360 + int(delta_deg)
+    return end < 0 or end >= 360
+
+
+def is_jump(delta_deg, dt, max_plausible_deg_s, same_cycle_dt_s=SAME_CYCLE_DT_S,
+            wrap_allowance_deg=0.0, crossing_zero=False):
+    """
+    Plan 7.2 jump test for one pair; same-cycle pairs (dt < same_cycle_dt_s) never jump.
+
+    A pair that crosses 0 (``crossing_zero``) is allowed ``wrap_allowance_deg``
+    more, for the dead zone the controller skips there.
+    """
     if dt < same_cycle_dt_s or dt <= 0.0:
         return False
-    return abs(delta_deg) > max_plausible_deg_s * dt + JUMP_SLACK_DEG
+    allowed = max_plausible_deg_s * dt + JUMP_SLACK_DEG
+    if crossing_zero:
+        allowed += wrap_allowance_deg
+    return abs(delta_deg) > allowed
 
 
 def score_jumps(times, degrees, max_plausible_deg_s, percents=None,
-                same_cycle_dt_s=SAME_CYCLE_DT_S):
+                same_cycle_dt_s=SAME_CYCLE_DT_S, wrap_allowance_deg=0.0):
     """
     Score every consecutive pair for implausible jumps.
 
@@ -237,7 +266,8 @@ def score_jumps(times, degrees, max_plausible_deg_s, percents=None,
         if dt < same_cycle_dt_s or dt <= 0.0:
             same_cycle += 1
             continue
-        if is_jump(d, dt, max_plausible_deg_s, same_cycle_dt_s):
+        if is_jump(d, dt, max_plausible_deg_s, same_cycle_dt_s, wrap_allowance_deg,
+                   crosses_zero(degrees[i - 1], d)):
             indices.add(i)
             jumps.append({
                 't_host': times[i - 1],
@@ -393,7 +423,8 @@ def summarize_step(rows, meta, config):
     jumps, same_cycle, jump_pairs = score_jumps(
         times, degrees, config['max_plausible_deg_s'],
         [int(r.commanded_percent) for r in rows],
-        float(config.get('same_cycle_dt_s', SAME_CYCLE_DT_S)))
+        float(config.get('same_cycle_dt_s', SAME_CYCLE_DT_S)),
+        float(config.get('wrap_allowance_deg', 0.0)))
 
     summary = collections.OrderedDict()
     summary['index'] = int(meta['index'])
@@ -541,9 +572,39 @@ def analyze_sensor_sweep(run_info, rows):
         'same_cycle_pairs': sum(s['same_cycle_pairs'] for s in steps),
         'max_gap_s': max((s['max_gap_s'] for s in steps), default=0.0),
     }
+    # The plugin's plausibility gate (max_plausible_deg_s) drops a misread before
+    # it reaches telemetry, so its counters over the sweep are part of the verdict.
+    gate = gate_counters_delta(run_info.get('sensor_diagnostics_before'),
+                               run_info.get('sensor_diagnostics_after'))
+    result['plugin_gate'] = gate
     result['suggested_pass'] = (bool(steps) and result['totals']['jumps'] == 0 and
-                                result['totals']['reversals'] == 0)
+                                result['totals']['reversals'] == 0 and
+                                (gate['reports_rejected'] or 0) == 0 and
+                                (gate['gate_resyncs'] or 0) == 0)
     return result
+
+
+GATE_COUNTERS = ('reports_held', 'reports_rejected', 'jumps_confirmed', 'gate_resyncs')
+
+
+def gate_counters_delta(before, after):
+    """
+    Change in the plugin's plausibility-gate counters over a sweep.
+
+    ``before`` and ``after`` are the ``roamadome: sensor`` value dicts the node
+    saved; a counter missing on either side (older plugin, or no diagnostics
+    seen) gives None. ``known`` is False when nothing could be read.
+    """
+    out = collections.OrderedDict()
+    known = False
+    for key in GATE_COUNTERS:
+        try:
+            out[key] = int((after or {})[key]) - int((before or {})[key])
+            known = True
+        except (KeyError, TypeError, ValueError):
+            out[key] = None
+    out['known'] = known
+    return out
 
 
 def _direction_fit(summaries, direction, angle_sign):
@@ -646,6 +707,272 @@ def analyze_speed_sweep(run_info, rows):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Position sweep: stopping-distance curve and firmware position moves
+# ---------------------------------------------------------------------------
+
+def fit_line(xs, ys):
+    """Least-squares ``y = slope * x + intercept``; None with fewer than two distinct x."""
+    n = len(xs)
+    if n < 2 or len(set(xs)) < 2 or n != len(ys):
+        return None
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    slope = sxy / sxx
+    intercept = mean_y - slope * mean_x
+    ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    ss_tot = sum((y - mean_y) ** 2 for y in ys)
+    if ss_tot > 0.0:
+        r_squared = 1.0 - ss_res / ss_tot
+    else:
+        r_squared = 1.0 if ss_res == 0.0 else NAN
+    return {'slope': slope, 'intercept': intercept, 'r_squared': r_squared, 'points': n}
+
+
+def _last_moving_time(times, velocities, stopped_deg_s, after_t):
+    """Latest sample time at or after ``after_t`` whose speed exceeds ``stopped_deg_s``."""
+    last = None
+    for t, v in zip(times, velocities):
+        if t >= after_t and _finite(v) and abs(v) > stopped_deg_s:
+            last = t
+    return last
+
+
+def summarize_stop_step(rows, meta, config):
+    """
+    One stopping-distance step: steady percent, then 0, coasting to standstill.
+
+    The stop instant is the first telemetry sample that reports
+    ``commanded_percent`` 0 after the drive (the plugin stamps the percent it
+    last sent, so this is within one report of the ``:DPR0``); the speed just
+    before it is the slope over the previous ``PRE_STOP_WINDOW_S``; the stop
+    distance is the unwrapped travel from that instant to the last sample.
+    """
+    times = [float(r.t_host) for r in rows]
+    degrees = [int(r.position_deg) for r in rows]
+    unwrapped = unwrap_degrees(degrees)
+    stopped_deg_s = float(config.get('stopped_deg_s', 5.0))
+    jumps, same_cycle, _ = score_jumps(
+        times, degrees, config.get('max_plausible_deg_s', 720.0),
+        [int(r.commanded_percent) for r in rows],
+        float(config.get('same_cycle_dt_s', SAME_CYCLE_DT_S)),
+        float(config.get('wrap_allowance_deg', 0.0)))
+
+    summary = collections.OrderedDict()
+    summary['index'] = int(meta['index'])
+    summary['kind'] = 'stop'
+    summary['percent'] = int(meta['percent'])
+    summary['direction'] = int(meta['direction'])
+    summary['samples'] = len(rows)
+    summary['end_reason'] = meta.get('end_reason')
+    summary['settled'] = meta.get('settled')
+    summary['jump_count'] = len(jumps)
+    summary['same_cycle_pairs'] = same_cycle
+    summary['max_gap_s'] = max_gap(times)
+
+    i_stop = None
+    driven = False
+    for i, r in enumerate(rows):
+        if int(r.commanded_percent) != 0:
+            driven = True
+        elif driven:
+            i_stop = i
+            break
+    if i_stop is None:
+        coast = [i for i, r in enumerate(rows) if r.phase == PHASE_COAST]
+        i_stop = coast[0] if coast else None
+    if i_stop is None or i_stop < 1:
+        summary['stop_found'] = False
+        summary['speed_before_stop_deg_s'] = NAN
+        summary['speed_before_stop_rad_s'] = NAN
+        summary['stop_distance_deg'] = NAN
+        summary['stop_time_s'] = NAN
+        return summary
+    t_stop = times[i_stop]
+    pre = [i for i in range(i_stop) if times[i] >= t_stop - PRE_STOP_WINDOW_S]
+    if len(pre) >= 3:
+        speed = regression_slope([times[i] for i in pre], [unwrapped[i] for i in pre])
+    else:
+        speed = NAN
+    velocities = trailing_velocities(times, unwrapped, STOP_VELOCITY_WINDOW_S)
+    last_moving = _last_moving_time(times, velocities, stopped_deg_s, t_stop)
+    # A pass through 0 deg adds the dead zone the controller skips there (about
+    # 9 deg) to the apparent travel: flag it for the speed window and the coast.
+    summary['pre_stop_crosses_zero'] = any(
+        crosses_zero(degrees[i - 1], shortest_delta(degrees[i - 1], degrees[i]))
+        for i in pre[1:] + [i_stop] if i >= 1)
+    summary['coast_crosses_zero'] = any(
+        crosses_zero(degrees[i - 1], shortest_delta(degrees[i - 1], degrees[i]))
+        for i in range(i_stop + 1, len(degrees)))
+    summary['stop_found'] = True
+    summary['t_stop'] = t_stop
+    summary['speed_before_stop_deg_s'] = abs(speed) if _finite(speed) else NAN
+    summary['speed_before_stop_rad_s'] = math.radians(abs(speed)) if _finite(speed) else NAN
+    summary['stop_distance_deg'] = abs(unwrapped[-1] - unwrapped[i_stop])
+    summary['stop_time_s'] = (last_moving - t_stop) if last_moving is not None else 0.0
+    return summary
+
+
+def summarize_move_step(rows, meta, config):
+    """
+    Summarise one firmware position move (``:DPA``).
+
+    Peak speed, overshoot, rest error, settle time and, when the fudge is
+    known, the speed on entering the fudge band.
+    """
+    times = [float(r.t_host) for r in rows]
+    degrees = [int(r.position_deg) for r in rows]
+    unwrapped = unwrap_degrees(degrees)
+    target = int(meta['target_deg'])
+    delta = int(meta['delta_deg'])
+    direction = _sign(delta)
+    stopped_deg_s = float(config.get('stopped_deg_s', 5.0))
+    fudge = config.get('fudge_deg')
+    t_cmd = float(meta.get('t_move_wall', times[0] if times else 0.0))
+    velocities = trailing_velocities(times, unwrapped, STOP_VELOCITY_WINDOW_S)
+    jumps, same_cycle, _ = score_jumps(
+        times, degrees, config.get('max_plausible_deg_s', 720.0),
+        [int(r.commanded_percent) for r in rows],
+        float(config.get('same_cycle_dt_s', SAME_CYCLE_DT_S)),
+        float(config.get('wrap_allowance_deg', 0.0)))
+
+    summary = collections.OrderedDict()
+    summary['index'] = int(meta['index'])
+    summary['kind'] = 'move'
+    summary['percent'] = 0
+    summary['direction'] = direction
+    summary['start_deg'] = meta.get('start_deg')
+    summary['target_deg'] = target
+    summary['delta_deg'] = delta
+    # The controller never reports 356..3 deg, so a rest error against a target
+    # there is inflated by the dead zone.
+    summary['target_in_dead_zone'] = target >= 356 or target <= 3
+    summary['samples'] = len(rows)
+    summary['end_reason'] = meta.get('end_reason')
+    summary['settled'] = meta.get('settled')
+    summary['firmware'] = meta.get('firmware')
+    summary['jump_count'] = len(jumps)
+    summary['same_cycle_pairs'] = same_cycle
+    summary['max_gap_s'] = max_gap(times)
+    if not rows:
+        for key in ('peak_deg_s', 'furthest_past_target_deg', 'rest_error_deg', 'settle_s',
+                    'arrival_deg_s'):
+            summary[key] = NAN
+        summary['reached_target'] = False
+        return summary
+    finite_v = [abs(v) for v in velocities if _finite(v)]
+    summary['peak_deg_s'] = max(finite_v) if finite_v else NAN
+    # Signed distance past the target along the direction of travel: positive is
+    # overshoot, negative means the dome never reached the target.
+    past = [shortest_delta(target, d) * direction for d in degrees]
+    summary['furthest_past_target_deg'] = max(past)
+    summary['reached_target'] = max(past) >= 0
+    summary['rest_error_deg'] = shortest_delta(target, degrees[-1])
+    last_moving = _last_moving_time(times, velocities, stopped_deg_s, t_cmd)
+    summary['settle_s'] = (last_moving - t_cmd) if last_moving is not None else 0.0
+    arrival = NAN
+    if _finite(fudge):
+        for i, d in enumerate(degrees):
+            if abs(shortest_delta(target, d)) <= fudge and times[i] >= t_cmd:
+                arrival = abs(velocities[i]) if _finite(velocities[i]) else NAN
+                break
+    summary['arrival_deg_s'] = arrival
+    summary['jumps'] = jumps
+    return summary
+
+
+def _abs_stats(values):
+    finite = [abs(v) for v in values if _finite(v)]
+    if not finite:
+        return {'count': 0, 'max_abs': None, 'mean_abs': None}
+    return {'count': len(finite), 'max_abs': max(finite), 'mean_abs': sum(finite) / len(finite)}
+
+
+def analyze_position_sweep(run_info, rows):
+    """Position sweep result: the stopping-distance curve and the move table."""
+    config = dict(run_info.get('config', {}))
+    settings = run_info.get('settings_context') or {}
+    if 'fudge_deg' not in config and _finite(settings.get('fudge')):
+        config['fudge_deg'] = int(settings['fudge'])
+    groups = group_steps(rows)
+    metas = _steps_meta(run_info, groups)
+
+    stops = []
+    moves = []
+    for index, meta in metas.items():
+        step_rows = groups.get(index, [])
+        if meta.get('kind') == 'move':
+            moves.append(summarize_move_step(step_rows, meta, config))
+        else:
+            stops.append(summarize_stop_step(step_rows, meta, config))
+
+    result = _header(run_info)
+    result['settings'] = settings
+
+    curve = collections.OrderedDict()
+    # Only steps that ran their full time and coasted to rest carry a valid distance.
+    usable = [s for s in stops if s.get('stop_found') and _finite(s['speed_before_stop_deg_s'])
+              and s.get('end_reason') == 'completed' and s.get('settled') is True]
+    curve['steps'] = stops
+    curve['fit_steps'] = [s['index'] for s in usable]
+    curve['fit_steps_crossing_zero'] = [s['index'] for s in usable if
+                                        s.get('pre_stop_crosses_zero') or
+                                        s.get('coast_crosses_zero')]
+    curve['fit'] = fit_line([s['speed_before_stop_deg_s'] for s in usable],
+                            [s['stop_distance_deg'] for s in usable])
+    for direction in (1, -1):
+        subset = [s for s in usable if s['direction'] == direction]
+        curve['fit_' + DIRECTION_NAMES[direction]] = fit_line(
+            [s['speed_before_stop_deg_s'] for s in subset],
+            [s['stop_distance_deg'] for s in subset])
+    if curve['fit']:
+        curve['fit']['note'] = ('stop_distance_deg = slope [s] x speed_before_stop_deg_s + '
+                                'intercept [deg]')
+    result['stop_curve'] = curve
+
+    move_table = collections.OrderedDict()
+    move_table['steps'] = [_strip(m, keep_jumps=False) for m in moves]
+    completed = [m for m in moves if m.get('end_reason') == 'completed']
+    move_table['count'] = len(moves)
+    move_table['completed'] = len(completed)
+    move_table['timed_out'] = sum(1 for m in moves if m.get('end_reason') == 'timeout')
+    move_table['never_reached_target'] = sum(1 for m in moves if not m.get('reached_target'))
+    move_table['firmware_timeouts'] = sum(
+        int((m.get('firmware') or {}).get('position_timeouts', 0) or 0) for m in moves)
+    move_table['rest_error_deg'] = _abs_stats([m['rest_error_deg'] for m in completed])
+    for direction, name in ((1, 'angle_increasing'), (-1, 'angle_decreasing')):
+        subset = [m['rest_error_deg'] for m in completed if m['direction'] == direction]
+        move_table['rest_error_deg_' + name] = _abs_stats(subset)
+    overs = [m['furthest_past_target_deg'] for m in completed
+             if _finite(m['furthest_past_target_deg']) and m['furthest_past_target_deg'] > 0]
+    move_table['overshoot_max_deg'] = max(overs) if overs else 0
+    arrivals = [m['arrival_deg_s'] for m in completed if _finite(m['arrival_deg_s'])]
+    move_table['arrival_deg_s'] = {
+        'count': len(arrivals),
+        'min': min(arrivals) if arrivals else None,
+        'max': max(arrivals) if arrivals else None,
+        'mean': (sum(arrivals) / len(arrivals)) if arrivals else None,
+    }
+    if curve['fit'] and arrivals:
+        fit = curve['fit']
+        move_table['coast_from_arrival_deg'] = {
+            'min': fit['slope'] * min(arrivals) + fit['intercept'],
+            'max': fit['slope'] * max(arrivals) + fit['intercept'],
+        }
+    result['moves'] = move_table
+    result['totals'] = {
+        'samples': sum(s['samples'] for s in stops) + sum(m['samples'] for m in moves),
+        'jumps': sum(s['jump_count'] for s in stops) + sum(m['jump_count'] for m in moves),
+        'same_cycle_pairs': (sum(s['same_cycle_pairs'] for s in stops) +
+                             sum(m['same_cycle_pairs'] for m in moves)),
+        'max_gap_s': max([s['max_gap_s'] for s in stops] + [m['max_gap_s'] for m in moves],
+                         default=0.0),
+    }
+    return result
+
+
 def analyze_run(run_info, rows):
     """Dispatch on ``run_info['sweep']``."""
     sweep = run_info.get('sweep')
@@ -653,6 +980,8 @@ def analyze_run(run_info, rows):
         return analyze_sensor_sweep(run_info, rows)
     if sweep == 'speed':
         return analyze_speed_sweep(run_info, rows)
+    if sweep == 'position':
+        return analyze_position_sweep(run_info, rows)
     raise ValueError('unknown sweep type: %r' % (sweep,))
 
 

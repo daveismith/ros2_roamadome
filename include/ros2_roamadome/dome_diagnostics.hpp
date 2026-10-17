@@ -56,6 +56,14 @@ struct DomeDiagnosticsState
   /// Sensor error count grew between the two most recent status polls.
   bool sensor_errors_increased = false;
   std::optional<uint32_t> packet_serial_errors;
+  /// Plausibility gate (max_plausible_deg_s): reports held for confirmation,
+  /// dropped as glitches, and held reports the next one confirmed as real jumps.
+  uint32_t reports_held = 0;
+  uint32_t reports_rejected = 0;
+  uint32_t jumps_confirmed = 0;
+  /// Reports accepted although implausible after repeated disagreement (gate too tight).
+  uint32_t gate_resyncs = 0;
+  std::optional<TimePoint> last_report_rejected;
 
   // Motion
   uint32_t position_timeouts = 0;
@@ -99,6 +107,8 @@ struct DomeDiagnosticsOptions
   double report_stale_s = 0.5;
   /// Motion stays ERROR this long after a position timeout, then WARN.
   double timeout_error_s = 5.0;
+  /// Sensor is WARN this long after the plausibility gate rejected a report.
+  double rejection_warn_s = 10.0;
 };
 
 /// @brief Fold one classified console line into the state.
@@ -122,6 +132,9 @@ void applyStatusSection(
   DomeDiagnosticsState::TimePoint now);
 
 /// @brief Note that a "DOME POSITION:" report arrived.
+///
+/// A flowing report also proves that position reporting is enabled, whether or
+/// not the "Position Reporting Enabled" ack of the startup #DPREPORT was seen.
 /// @return the interval since the previous report in seconds (0 for the first one)
 ros2_roamadome_PUBLIC
 double recordPositionReport(

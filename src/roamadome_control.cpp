@@ -116,7 +116,8 @@ RoamadomeControl::RoamadomeControl()
 : logger_(rclcpp::get_logger("RoamadomeControl")), position_(0.0), velocity_(0.0),
   cmd_position_(0.0), cmd_velocity_(0.0),
   currentMode_(CommandMode::IDLE),
-  lastSentPosition_(-1.0), lastSentVelocity_(0.0),
+  lastSentPosition_(std::numeric_limits<double>::quiet_NaN()),
+  lastSentVelocity_(std::numeric_limits<double>::quiet_NaN()),
   configRefreshIntervalMs_(60000)
 {
   std::cout << "RoamadomeControl initialized." << std::endl;
@@ -313,6 +314,18 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
   }
   positionTracker_ = PositionTracker(velocityWindowS_);
 
+  if (!parseOptionalDoubleParameter(
+      parameters,
+      logger_,
+      "max_plausible_deg_s",
+      0.0,
+      [](double value) {return value >= 0.0;},
+      ">= 0",
+      &maxPlausibleDegS_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   if (!parseOptionalBoolParameter(
       parameters, logger_, "serial_baud_sweep", false, &serialBaudSweep_))
   {
@@ -432,6 +445,15 @@ bool RoamadomeControl::openDeviceAndRunStartup()
   const uint32_t report_ms = (cycle_ms > 5U) ? (cycle_ms - 5U) : 1U;
 
   RCLCPP_INFO(logger_, "Read Rate in Hz: %u (#DPREPORT%u)", info_.rw_rate, report_ms);
+
+  // Reports arrive at the report interval; two read in one cycle are stamped
+  // microseconds apart, so the gate never judges a pair over less than that.
+  plausibilityGate_ = ReportPlausibilityGate(maxPlausibleDegS_, report_ms / 1000.0);
+  if (plausibilityGate_.enabled()) {
+    RCLCPP_INFO(logger_,
+      "Position report plausibility gate on: a step over %.0f deg/s x dt + 2 deg "
+      "(+10 deg across 0) is held until the next report confirms it", maxPlausibleDegS_);
+  }
 
   // Create and setup the serial handler
   serialHandler_ = std::make_unique<RoamadomeSerialPort>(serialPort_);
@@ -990,6 +1012,16 @@ bool RoamadomeControl::rotationInProgress(std::string * reason) const
       "%); stop it before changing settings";
     return true;
   }
+  if (benchActive_ && benchMoveTarget_.has_value()) {
+    *reason = "a bench move to " + std::to_string(*benchMoveTarget_) +
+      " deg is active; release it (bench drive 0) before changing settings";
+    return true;
+  }
+  if (firmwareMoveOutstanding_.load()) {
+    *reason = "a firmware position move is still outstanding; wait for REACHED TARGET "
+      "before changing settings";
+    return true;
+  }
   return false;
 }
 
@@ -1227,6 +1259,14 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
     RCLCPP_WARN(logger_, "Bench mode enabled: %s raw drive service is available",
       benchDriveService_->get_service_name());
   }
+  if (enableBenchMode_ && !benchMoveService_) {
+    benchMoveService_ = node->create_service<astromech_msgs::srv::DomeBenchMove>(
+      "~/bench/move",
+      [this](const std::shared_ptr<astromech_msgs::srv::DomeBenchMove::Request> request,
+      std::shared_ptr<astromech_msgs::srv::DomeBenchMove::Response> response) {
+        handleBenchMove(request, response);
+      });
+  }
 
   if (!periodicConfigTimer_ && configRefreshIntervalMs_ > 0) {
     periodicConfigTimer_ = node->create_wall_timer(
@@ -1236,6 +1276,9 @@ hardware_interface::CallbackReturn RoamadomeControl::on_activate(
 
   // The unwrapped angle and sequence counter are "since activation".
   positionTracker_.reset();
+  plausibilityGate_.reset();
+  plausibilityGate_.resetCounters();
+  firmwareMoveOutstanding_.store(false);
   telemetrySequence_ = 0;
   velocity_ = std::numeric_limits<double>::quiet_NaN();
 
@@ -1300,6 +1343,7 @@ hardware_interface::CallbackReturn RoamadomeControl::on_deactivate(
   setupService_.reset();
   setHomeService_.reset();
   benchDriveService_.reset();
+  benchMoveService_.reset();
   // Keep the callback registered across deactivate so device.* writes continue
   // to be validated/rejected deterministically while hardware is inactive.
 
@@ -1445,6 +1489,14 @@ hardware_interface::return_type RoamadomeControl::write(
         }
         queued_command = sendQueue_.front();
         sendQueue_.pop();
+        if (queued_command->flow == SendQueueCommand::Flow::PARAMETER_UPDATE_ACK) {
+          // Mark it in flight before the serial write, so a bench request that
+          // arrives during the write cannot start motion behind a settings write.
+          activeSendQueueCommand_ = *queued_command;
+          sendQueueCommandActive_ = true;
+          sendQueueStage_ = SendQueueStage::WAIT_WRITE_SETTINGS;
+          sendQueueStageStartTime_ = std::chrono::steady_clock::now();
+        }
         break;
       }
     }
@@ -1465,38 +1517,39 @@ hardware_interface::return_type RoamadomeControl::write(
     } else if (serialHandler_->sendCommand(command.command)) {
       {
         std::lock_guard<std::mutex> lock(sendQueue_mutex_);
-        activeSendQueueCommand_ = command;
-        sendQueueCommandActive_ = true;
-        sendQueueStage_ = SendQueueStage::WAIT_WRITE_SETTINGS;
-        sendQueueStageStartTime_ = std::chrono::steady_clock::now();
+        sendQueueStageStartTime_ = std::chrono::steady_clock::now();  // ack timeout from the send
       }
-
       RCLCPP_INFO(logger_, "Sent ack-tracked command '%s' (%s)",
         command.command.c_str(), command.label.c_str());
     } else {
+      {
+        std::lock_guard<std::mutex> lock(sendQueue_mutex_);
+        sendQueueCommandActive_ = false;
+        sendQueueStage_ = SendQueueStage::IDLE;
+      }
       RCLCPP_WARN(logger_, "Failed ack-tracked command '%s' (%s)",
         command.command.c_str(), command.label.c_str());
     }
   }
 
   // Determine which command mode is active and send appropriate command
-  if (currentMode_ == CommandMode::POSITION) {
+  if (currentMode_ == CommandMode::POSITION && std::isfinite(cmd_position_)) {
     // Position command: convert radians to degrees and normalize to [0, 359]
     uint32_t target_degrees = normalizeAngleDegrees(cmd_position_);
 
     // Only send if position changed significantly (avoid redundant commands)
-    if (lastSentPosition_ < 0 || std::fabs(cmd_position_ - lastSentPosition_) > 0.01) {
+    if (std::isnan(lastSentPosition_) || std::fabs(cmd_position_ - lastSentPosition_) > 0.01) {
       if (sendPositionCommand(target_degrees)) {
         lastSentPosition_ = cmd_position_;
         RCLCPP_DEBUG(logger_, "Sent position command: %u°", target_degrees);
       }
     }
-  } else if (currentMode_ == CommandMode::VELOCITY) {
+  } else if (currentMode_ == CommandMode::VELOCITY && std::isfinite(cmd_velocity_)) {
     // Velocity command: convert rad/s to percentage [-100, 100]
     int32_t target_percentage = velocityToPercentage(cmd_velocity_);
 
     // Only send if velocity changed significantly (avoid redundant commands)
-    if (std::fabs(cmd_velocity_ - lastSentVelocity_) > 0.01) {
+    if (std::isnan(lastSentVelocity_) || std::fabs(cmd_velocity_ - lastSentVelocity_) > 0.01) {
       if (sendVelocityCommand(target_percentage)) {
         lastSentVelocity_ = cmd_velocity_;
         RCLCPP_DEBUG(logger_, "Sent velocity command: %d%%", target_percentage);
@@ -1573,6 +1626,27 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
     sendStopCommand();
   }
 
+  if (new_mode == CommandMode::VELOCITY && currentMode_ != CommandMode::VELOCITY) {
+    // :DPR0 has been sent (or nothing was commanded): the first non-zero velocity
+    // command is sent, a command of 0 is not re-sent.
+    cmd_velocity_ = 0.0;
+    lastSentVelocity_ = 0.0;
+  }
+  if (new_mode != CommandMode::IDLE && firmwareMoveOutstanding_.load()) {
+    RCLCPP_WARN(logger_,
+      "A firmware position move is still outstanding; it cannot be cancelled from the host and "
+      "resumes after any :DPR0 until the firmware reports REACHED TARGET or a timeout");
+  }
+  if (new_mode == CommandMode::POSITION && currentMode_ != CommandMode::POSITION) {
+    // A position controller starts with whatever the command interface holds
+    // (0 unless it wrote first), which used to send the dome to 0 degrees on
+    // activation. Hold the current angle instead until the controller commands.
+    cmd_position_ = position_;
+    lastSentPosition_ = cmd_position_;
+    RCLCPP_INFO(logger_, "Position mode: holding the current angle (%.1f deg) until commanded",
+      radiansToDegrees(position_));
+  }
+
   {
     std::lock_guard<std::mutex> lock(bench_mutex_);
     currentMode_ = new_mode;
@@ -1633,7 +1707,11 @@ bool RoamadomeControl::sendPositionCommand(uint32_t degrees)
 
   // Format: :DPA<degrees> where degrees is 0-359
   std::string command = buildCommand(":DPA", degrees);
-  return serialHandler_->sendCommand(command);
+  if (!serialHandler_->sendCommand(command)) {
+    return false;
+  }
+  firmwareMoveOutstanding_.store(true);
+  return true;
 }
 
 bool RoamadomeControl::sendVelocityCommand(int32_t percentage)
@@ -1660,24 +1738,19 @@ void RoamadomeControl::updateTelemetryModeLocked()
     telemetryCommandModeValue(currentMode_));
 }
 
-void RoamadomeControl::handleBenchDrive(
-  const std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Request> request,
-  std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Response> response)
+bool RoamadomeControl::benchRequestAllowed(std::string * reason, bool starts_motion) const
 {
-  // Executor thread. Records the request only; write() does the serial I/O.
-  response->success = false;
   if (!lifecycleActive_.load()) {
-    response->message = "hardware interface is inactive; bench drive rejected";
-    return;
+    *reason = "hardware interface is inactive";
+    return false;
   }
   if (!serialHandler_ || !serialHandler_->isOpen()) {
-    response->message = "serial port is closed; bench drive rejected";
-    return;
+    *reason = "serial port is closed";
+    return false;
   }
-  const int32_t percent = std::clamp<int32_t>(request->percent, -100, 100);
-  if (percent != 0) {
+  if (starts_motion) {
     // A settings write that reaches the firmware stops the motor (plan 2.3) and
-    // would never be resent, so do not start a drive while one is in flight.
+    // would never be resent, so do not start motion while one is in flight.
     bool settings_in_flight = false;
     {
       std::lock_guard<std::mutex> lock(sendQueue_mutex_);
@@ -1690,15 +1763,45 @@ void RoamadomeControl::handleBenchDrive(
       }
     }
     if (settings_in_flight) {
-      response->message = "a settings write is in flight; bench drive rejected";
-      return;
+      *reason = "a settings write is in flight";
+      return false;
     }
   }
+  return true;
+}
+
+void RoamadomeControl::handleBenchDrive(
+  const std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Request> request,
+  std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Response> response)
+{
+  // Executor thread. Records the request only; write() does the serial I/O.
+  response->success = false;
+  const int32_t percent = std::clamp<int32_t>(request->percent, -100, 100);
+  std::string reason;
+  if (!benchRequestAllowed(&reason, percent != 0)) {
+    response->message = reason + "; bench drive rejected";
+    return;
+  }
+  std::optional<uint16_t> released_move;
   {
     std::lock_guard<std::mutex> lock(bench_mutex_);
     if (currentMode_ != CommandMode::IDLE) {
       response->message = "a controller is commanding the dome (mode is not IDLE); "
         "bench drive rejected";
+      return;
+    }
+    if (percent != 0 && benchActive_ && benchMoveTarget_.has_value()) {
+      // :DPR overrides a firmware move only while non-zero; at :DPR0 the firmware
+      // resumes the move. Never mix the two.
+      response->message = "a bench move to " + std::to_string(*benchMoveTarget_) +
+        " deg is active; release it with percent 0 once the dome is at rest; bench drive rejected";
+      return;
+    }
+    if (percent != 0 && firmwareMoveOutstanding_.load()) {
+      // A released or controller move the firmware has not finished: a drive would
+      // override it and the stop would restart it.
+      response->message = "a firmware position move is still outstanding (no REACHED TARGET or "
+        "timeout yet); wait for it to finish; bench drive rejected";
       return;
     }
     if (!benchActive_ && percent == 0 && benchLastSentPercent_ == 0 &&
@@ -1711,11 +1814,75 @@ void RoamadomeControl::handleBenchDrive(
     benchActive_ = true;
     benchPendingPercent_ = percent;
     benchLastCallTime_ = std::chrono::steady_clock::now();
+    if (percent == 0 && benchMoveTarget_.has_value()) {
+      released_move = benchMoveTarget_;
+      benchMoveTarget_.reset();
+      benchMoveSent_ = false;
+    }
     updateTelemetryModeLocked();
   }
   response->success = true;
+  if (released_move.has_value()) {
+    response->message = "bench move to " + std::to_string(*released_move) + " deg released";
+    return;
+  }
   response->message = "bench drive " + std::to_string(percent) + "% accepted; call again within " +
     std::to_string(benchHeartbeatTimeoutMs_) + " ms to keep the dome turning";
+}
+
+void RoamadomeControl::handleBenchMove(
+  const std::shared_ptr<astromech_msgs::srv::DomeBenchMove::Request> request,
+  std::shared_ptr<astromech_msgs::srv::DomeBenchMove::Response> response)
+{
+  // Executor thread. Records the request only; write() sends :DPA<target>.
+  response->success = false;
+  if (request->target_deg > 359) {
+    response->message = "target_deg must be 0..359; bench move rejected";
+    return;
+  }
+  const uint16_t target = request->target_deg;
+  std::string reason;
+  if (!benchRequestAllowed(&reason, true)) {
+    response->message = reason + "; bench move rejected";
+    return;
+  }
+  bool kept_alive = false;
+  {
+    std::lock_guard<std::mutex> lock(bench_mutex_);
+    if (currentMode_ != CommandMode::IDLE) {
+      response->message = "a controller is commanding the dome (mode is not IDLE); "
+        "bench move rejected";
+      return;
+    }
+    if (benchActive_ && (benchPendingPercent_ != 0 || benchLastSentPercent_ != 0)) {
+      response->message = "a bench drive is active (pending " +
+        std::to_string(benchPendingPercent_) + "%); stop it (percent 0) first; bench move rejected";
+      return;
+    }
+    if (lastCommandedPercent_.load() != 0) {
+      response->message = "the dome is still commanded at " +
+        std::to_string(lastCommandedPercent_.load()) + "%; stop it first; bench move rejected";
+      return;
+    }
+    kept_alive = benchMoveTarget_.has_value() && *benchMoveTarget_ == target && benchMoveSent_;
+    if (!kept_alive) {
+      benchMoveTarget_ = target;
+      benchMoveSent_ = false;
+    }
+    benchActive_ = true;
+    benchPendingPercent_ = 0;
+    benchLastCallTime_ = std::chrono::steady_clock::now();
+    updateTelemetryModeLocked();
+  }
+  response->success = true;
+  if (kept_alive) {
+    response->message = "bench move to " + std::to_string(target) + " deg kept alive";
+    return;
+  }
+  response->message = "bench move to " + std::to_string(target) +
+    " deg accepted; the firmware runs it to completion (it cannot be cancelled); call again "
+    "within " + std::to_string(benchHeartbeatTimeoutMs_) +
+    " ms to keep the bench claim, then release it with bench drive 0 at rest";
 }
 
 void RoamadomeControl::resetBenchState()
@@ -1724,6 +1891,8 @@ void RoamadomeControl::resetBenchState()
   benchActive_ = false;
   benchPendingPercent_ = 0;
   benchLastSentPercent_ = 0;
+  benchMoveTarget_.reset();
+  benchMoveSent_ = false;
   updateTelemetryModeLocked();
 }
 
@@ -1733,9 +1902,13 @@ bool RoamadomeControl::stopBenchDrive(const char * reason)
   // clears the bench state only once that succeeded. On failure the state is
   // kept (pending 0) so write() retries every cycle.
   bool need_stop = false;
+  std::optional<uint16_t> move;
   {
     std::lock_guard<std::mutex> lock(bench_mutex_);
     need_stop = benchActive_ && benchLastSentPercent_ != 0;
+    if (benchActive_) {
+      move = benchMoveTarget_;
+    }
   }
   if (need_stop) {
     if (!sendStopCommand()) {
@@ -1747,15 +1920,21 @@ bool RoamadomeControl::stopBenchDrive(const char * reason)
     }
     RCLCPP_WARN(logger_, "Bench drive stopped (%s); sent :DPR0", reason);
   }
+  if (move.has_value()) {
+    RCLCPP_WARN(logger_,
+      "Bench move to %u deg released (%s); the firmware finishes the move on its own",
+      *move, reason);
+  }
   resetBenchState();
   return true;
 }
 
 void RoamadomeControl::serviceBenchDrive()
 {
-  enum class Action {NONE, SEND, EXPIRE, CONTROLLER};
+  enum class Action {NONE, SEND, MOVE, EXPIRE, CONTROLLER};
   Action action = Action::NONE;
   int32_t percent = 0;
+  uint16_t target = 0;
   {
     std::lock_guard<std::mutex> lock(bench_mutex_);
     if (!benchActive_) {
@@ -1766,13 +1945,16 @@ void RoamadomeControl::serviceBenchDrive()
       action = Action::CONTROLLER;
     } else if (now - benchLastCallTime_ > std::chrono::milliseconds(benchHeartbeatTimeoutMs_)) {
       action = Action::EXPIRE;
+    } else if (benchMoveTarget_.has_value() && !benchMoveSent_) {
+      action = Action::MOVE;
+      target = *benchMoveTarget_;
     } else if (benchPendingPercent_ != benchLastSentPercent_ ||
       (benchPendingPercent_ == 0 && lastCommandedPercent_.load() != 0))
     {
       action = Action::SEND;
       percent = benchPendingPercent_;
-    } else if (benchPendingPercent_ == 0) {
-      // Pending and last-sent are both 0: nothing to hold, go back to idle now.
+    } else if (benchPendingPercent_ == 0 && !benchMoveTarget_.has_value()) {
+      // Pending and last-sent are both 0 and no move is claimed: go back to idle now.
       benchActive_ = false;
       updateTelemetryModeLocked();
     }
@@ -1782,6 +1964,17 @@ void RoamadomeControl::serviceBenchDrive()
     stopBenchDrive("a controller took over");
   } else if (action == Action::EXPIRE) {
     stopBenchDrive("heartbeat expired");
+  } else if (action == Action::MOVE) {
+    if (!sendPositionCommand(target)) {
+      RCLCPP_ERROR_THROTTLE(logger_, throttleClock_, 1000,
+        "Bench move: failed to send :DPA%u; will retry", target);
+    } else {
+      RCLCPP_INFO(logger_, "Bench move: sent :DPA%u", target);
+      std::lock_guard<std::mutex> lock(bench_mutex_);
+      if (benchMoveTarget_.has_value() && *benchMoveTarget_ == target) {
+        benchMoveSent_ = true;  // a newer target would be sent on the next cycle
+      }
+    }
   } else if (action == Action::SEND) {
     const bool sent = percent == 0 ? sendStopCommand() : sendVelocityCommand(percent);
     if (!sent) {
@@ -1837,14 +2030,10 @@ void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
 {
   // Runs on the read path for every "DOME POSITION: <n>" line. Host receive
   // time is the sample timestamp (firmware report jitter is ~1 ms).
+  (void)radians;  // recomputed from the accepted integer angle
   const auto now_steady = std::chrono::steady_clock::now();
-  const PositionTracker::Estimate estimate = positionTracker_.update(
-    now_steady, static_cast<uint16_t>(degrees % 360));
 
-  position_ = radians;
-  velocity_ = estimate.velocity_rad_s;
-  ++telemetrySequence_;
-
+  // Gap accounting counts raw arrivals, before the plausibility gate.
   double gap_s = 0.0;
   uint32_t gaps = 0;
   {
@@ -1860,8 +2049,53 @@ void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
       gap_s * 1000.0, gaps);
   }
 
+  const ReportPlausibilityGate::Decision decision =
+    plausibilityGate_.update(now_steady, static_cast<uint16_t>(degrees % 360));
+  if (decision.held || decision.rejected || decision.confirmed || decision.resynced) {
+    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+    diagnosticsState_.reports_held = plausibilityGate_.heldCount();
+    diagnosticsState_.reports_rejected = plausibilityGate_.rejectedCount();
+    diagnosticsState_.jumps_confirmed = plausibilityGate_.confirmedCount();
+    diagnosticsState_.gate_resyncs = plausibilityGate_.resyncCount();
+    if (decision.rejected) {
+      diagnosticsState_.last_report_rejected = now_steady;
+    }
+  }
+  if (decision.rejected) {
+    RCLCPP_WARN_THROTTLE(logger_, throttleClock_, 1000,
+      "Rejected implausible position report %u deg (the next report, %u deg, disagreed with it; "
+      "%u rejected since activation)", decision.dropped.degrees, degrees % 360,
+      plausibilityGate_.rejectedCount());
+  }
+  if (decision.resynced) {
+    RCLCPP_WARN(logger_,
+      "Position reports disagreed with the accepted history %u times in a row: accepting %u deg "
+      "as the new position (is max_plausible_deg_s below the dome's real speed?)",
+      ReportPlausibilityGate::kResyncAfter, degrees % 360);
+  }
+  if (decision.held) {
+    RCLCPP_DEBUG(logger_, "Holding position report %u deg until the next one confirms it",
+      degrees % 360);
+  }
+  if (decision.confirmed) {
+    RCLCPP_INFO(logger_, "Position jump to %u deg confirmed by the next report (%u deg)",
+      decision.accepted[0].degrees, degrees % 360);
+  }
+  for (std::size_t i = 0; i < decision.accepted_count; ++i) {
+    applyAcceptedReport(decision.accepted[i]);
+  }
+}
+
+void RoamadomeControl::applyAcceptedReport(const ReportPlausibilityGate::Report & report)
+{
+  const PositionTracker::Estimate estimate = positionTracker_.update(report.time, report.degrees);
+
+  position_ = estimate.position_rad;
+  velocity_ = estimate.velocity_rad_s;
+  ++telemetrySequence_;
+
   RCLCPP_DEBUG(logger_, "Position updated: %u° = %.4f rad, unwrapped %.4f rad, velocity %.4f rad/s",
-    degrees, radians, estimate.unwrapped_rad, estimate.velocity_rad_s);
+    report.degrees, estimate.position_rad, estimate.unwrapped_rad, estimate.velocity_rad_s);
 
   rclcpp::Publisher<astromech_msgs::msg::DomeTelemetry>::SharedPtr publisher;
   rclcpp::Clock::SharedPtr clock;
@@ -1875,9 +2109,9 @@ void RoamadomeControl::handlePositionReport(uint32_t degrees, double radians)
   }
 
   astromech_msgs::msg::DomeTelemetry msg;
-  msg.header.stamp = clock->now();
+  msg.header.stamp = clock->now();  // a confirmed held report is published one report late
   msg.header.frame_id = joint_name_;
-  msg.position_deg = static_cast<uint16_t>(degrees % 360);
+  msg.position_deg = report.degrees;
   msg.position_rad = estimate.position_rad;
   msg.unwrapped_rad = estimate.unwrapped_rad;
   msg.velocity_rad_s = estimate.velocity_rad_s;
@@ -1903,7 +2137,12 @@ void RoamadomeControl::handleClassifiedLine(const std::string & raw_line)
 
   switch (line.kind) {
     case FirmwareLineKind::POSITION_TIMEOUT:
+      firmwareMoveOutstanding_.store(false);
       RCLCPP_WARN(logger_, "Firmware aborted the dome move: no position change within its timeout");
+      break;
+    case FirmwareLineKind::REACHED_TARGET:
+    case FirmwareLineKind::REACHED_HOME:
+      firmwareMoveOutstanding_.store(false);
       break;
     case FirmwareLineKind::READY:
       if (active) {

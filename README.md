@@ -113,6 +113,30 @@ dump or status poll never delays the position reports queued behind it by more
 than the cycle it arrives in, and the periodic `#DPCONFIG` refresh is deferred
 while the dome is moving (`config_refresh_interval_ms`).
 
+**Plausibility gate.** With `max_plausible_deg_s` set (0, the default, turns it off) a report
+whose step from the last accepted one exceeds `max_plausible_deg_s x dt + 2 deg` is held
+rather than applied; `dt` is never taken shorter than the report interval, and a step across
+0 deg gets 10 deg more because the controller skips 359 to 2 deg there. The next report
+decides: plausible from the last accepted one, the held report was a sensor-ring misread
+and is dropped (WARN `Rejected implausible position report`); plausible only from the held
+one, the dome really moved and both are applied in order (INFO); plausible from neither,
+the held one is dropped and the new one held. A real report is therefore delayed by one
+report, and lost only if the one after it disagrees with it; a single misread no longer
+shifts `unwrapped_rad` by a turn (the failure seen on the old sensor plate). If three
+reports in a row disagree with the accepted history (a dome faster than
+`max_plausible_deg_s`, whose every step is a little over the allowance), the newest is
+accepted as a **resync** so the position can never freeze; set the limit well above the
+real top speed. `position_deg`, `position_rad`, `unwrapped_rad`, `velocity_rad_s` and
+`sequence` only ever carry accepted reports; a held report that is later confirmed is
+published with the stamp of the cycle that confirmed it. The gate's counters are on the
+`roamadome: sensor` diagnostic (`reports_held`, `reports_rejected`, `jumps_confirmed`,
+`gate_resyncs`), which is WARN for 10 s after a rejection, and the bench node folds their
+change over a sensor sweep into `suggested_pass` (`plugin_gate` in `sensor_sweep.json`),
+since a misread the gate dropped never reaches the telemetry the sweep scores. The `r2_bringup` URDF sets
+600 deg/s, 1.5 x the measured top speed of 381 deg/s (6.65 rad/s); pick 1.5 x the speed
+sweep's maximum for another dome. Implementation: `ReportPlausibilityGate` in
+`include/ros2_roamadome/report_plausibility_gate.hpp`.
+
 ### Bench mode
 
 With the hardware parameter `enable_bench_mode` set to `true` the hardware node offers
@@ -135,6 +159,19 @@ the parameter `false` (the default) the service does not exist.
 - **Telemetry.** While a bench drive is active `~/telemetry` reports `command_mode` 3
   (`COMMAND_MODE_BENCH`) and the sent percent in `commanded_percent`; it returns to 0 when
   the drive stops. Settings writes are refused while `commanded_percent` is non-zero.
+- **Bench move.** `~/bench/move` (`astromech_msgs/srv/DomeBenchMove`, request
+  `uint16 target_deg`, 0..359) sends one absolute, home-relative `:DPA<target>` for the
+  position sweep. The firmware runs the move to completion on its own (`REACHED TARGET`, or
+  its own position timeout) and **the host cannot cancel it**: `:DPR0` does not clear the
+  firmware's target mode, and a non-zero `:DPR` only overrides it while non-zero (at `:DPR0`
+  the firmware resumes the move), so a non-zero drive is refused while a move is claimed and
+  a move is refused while a drive is active. The same gating as the drive applies (active,
+  port open, no controller, no settings write in flight), the claim is kept alive by
+  repeating the call (an identical target refreshes the heartbeat without re-sending; a new
+  target is sent), and `bench/drive` with percent 0 releases it; do that once the dome is at
+  rest. If the heartbeat expires while a move is claimed the claim is released with a WARN
+  and the firmware finishes the move. `command_mode` is 3 while the claim is held,
+  `commanded_percent` stays 0 (a move is not a percent), and settings writes are refused.
 
 Safety: the firmware has no watchdog in continuous rotation. The heartbeat only protects
 while this process is alive. If the process is killed (SIGKILL, crash, power loss to the
@@ -148,7 +185,11 @@ sends `:DPR0`) or a manual stop will halt it. Keep a human at the robot and the 
 hardware node: a **sensor sweep** that spins the dome at several percentages in both
 directions and scores every position report for jumps, reversals and stalls (plan 7.2), and a
 **speed sweep** that measures steady-state velocity per percentage, finds the minimum moving
-percentage and fits `omega = k * (p - p0)` per direction (plan 7.3).
+percentage and fits `omega = k * (p - p0)` per direction (plan 7.3). A third, the
+**position sweep**, measures the stopping-distance curve (steady percent, then 0, travel to
+rest) and a set of firmware position moves (`:DPA`) at the current `device.*` settings, for
+the position-move tuning in step (g) of
+[Re-tuning the velocity mapping](#re-tuning-the-velocity-mapping-when-the-dome-changes).
 
 Launch it with the robot (`dome_bench:=true` also skips `dome_controller` and the dome teleop):
 
@@ -170,7 +211,8 @@ The node finds the hardware node by name through the `hardware_node` parameter (
 `roamadome`, the lower-cased `ros2_control` block name), not by sharing its namespace as plan
 5.4 suggests: the hardware node's name comes from the URDF, so a parameter is simpler than
 pushing the bench node into a matching namespace. It uses `<hardware_node>/telemetry`,
-`<hardware_node>/bench/drive` and `<hardware_node>/{get,set}_parameters`.
+`<hardware_node>/bench/drive`, `<hardware_node>/bench/move` (position sweep only) and
+`<hardware_node>/{get,set}_parameters`.
 
 Parameters (read when a sweep starts, except `hardware_node` and `heartbeat_period_s`, which
 are read at startup and cannot be changed while the node runs). Invalid values are rejected,
@@ -189,13 +231,20 @@ strictly ascending without duplicates; settle times must be >= 0; durations and 
 | `sensor_sweep.settle_s` | `2.0` | Settle before the measure phase (addition to plan 5.4) |
 | `sensor_sweep.duration_s` | `30.0` | Measure phase per percent per direction |
 | `sensor_sweep.max_plausible_deg_s` | `720.0` | Jump threshold; replaced by 1.5 x the measured maximum of a completed speed sweep in `output_dir` that used the same `raw_motor` and moved at or above the sensor sweep's highest percent |
+| `sensor_sweep.wrap_allowance_deg` | `10.0` | Extra allowance for a step across 0 deg, where the controller skips 359 to 2 deg (every 0-crossing step is about 9 deg longer than the dome moved); applies to the jump scoring of every sweep, `>= 0` |
 | `speed_sweep.percents` | `[10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100]` | Ascending, each `+p` then `-p` |
 | `speed_sweep.settle_s` | `2.0` | Wait after each command before measuring |
 | `speed_sweep.min_measure_s` | `4.0` | Measure for max(this, one revolution at the observed speed) ... |
 | `speed_sweep.max_measure_s` | `30.0` | ... capped here (addition to plan 5.4, which fixes 30 s) |
 | `speed_sweep.stall_deg_s` | `3.0` | Stalled when the average speed over the last `stall_s` is below this; used by both sweeps |
 | `speed_sweep.stall_s` | `2.0` | |
-| `speed_sweep.raw_motor` | `true` | For both sweeps, temporarily set `device.max_speed` 100, `device.speed_target` 100, `device.scaling` false |
+| `speed_sweep.raw_motor` | `true` | For the sensor and speed sweeps, temporarily set `device.max_speed` 100, `device.speed_target` 100, `device.scaling` false; the position sweep always runs at the current settings |
+| `position_sweep.stop_percents` | `[35, 50, 70, 100]` | Stopping-distance curve: each `+p` then `-p`, ascending |
+| `position_sweep.stop_run_s` | `5.0` | Steady run before the stop (the dome's response time is about 1.5 s) |
+| `position_sweep.moves_deg` | `[150, -150, 40, -40, 90, -90, 20, -20, 120, -120, 60, -60]` | Firmware moves, each relative to the angle at its start, non-zero integers in -359..359 |
+| `position_sweep.settle_s` | `1.2` | A step is at rest once the reported angle has not changed for this long |
+| `position_sweep.move_timeout_s` | `12.0` | A move not at rest by then is recorded as `timeout` (the firmware's own `device.timeout` is 5 s without dome movement) |
+| `position_sweep.stopped_deg_s` | `5.0` | Speed below which the dome counts as stopped for the stop-time and settle-time clocks (analysis) |
 
 Services and topics on the bench node:
 
@@ -203,6 +252,7 @@ Services and topics on the bench node:
 |------|------|-------|
 | `~/start_sensor_sweep` | `std_srvs/Trigger` | Rejected if a sweep runs or is starting (the slot is claimed atomically), telemetry is not flowing, the hardware is not idle (`command_mode` 0, `commanded_percent` 0) or a hardware service is missing |
 | `~/start_speed_sweep` | `std_srvs/Trigger` | Same checks |
+| `~/start_position_sweep` | `std_srvs/Trigger` | Same checks, plus `bench/move` must be available. Runs the stop curve then the moves at the current `device.*` settings (nothing is written); each move starts from the angle the dome rests at |
 | `~/abort` | `std_srvs/Trigger` | Returns at once; the worker stops the dome, restores settings and writes partial results |
 | `~/status` | `std_msgs/String` | JSON at 2 Hz: state, sweep, run directory, phase, step, percent, direction, elapsed, counts so far, last result |
 
@@ -245,6 +295,7 @@ Output files in each run directory:
 | `run.json` | Sweep type, status (`running`, `complete`, `aborted`, `error`) and reason, the analysis config, the step list, settings and counts |
 | `sensor_sweep.json` | Per step: samples, mean and standard deviation of velocity over the measure phase, jumps (with start angle, change, interval, percent), reversals, stalls; the 10 degree jump start histogram; totals and `suggested_pass` (no jumps and no reversals) |
 | `speed_sweep.json` | Per step table; per direction (`positive_percent`, `negative_percent`): fit `k`, `p0`, R squared, `omega_max_rad_s` at 100 %, `min_percent`, velocity at `min_percent`; asymmetry ratio; recommended `max_speed_rad_per_sec` (the lower of the two maxima); the phase 7 `velocity_map` parameters keyed by velocity sign |
+| `position_sweep.json` | `settings` (the `device.*` the sweep ran at); `stop_curve.steps` with the speed just before the stop (slope over the 0.3 s before the first sample stamped `commanded_percent` 0), `stop_distance_deg` (unwrapped travel from that sample to rest) and `stop_time_s`, and `fit` (`stop_distance_deg = slope [s] x speed + intercept [deg]`, overall and per direction); `moves.steps` with `rest_error_deg` (final angle minus target, signed), `furthest_past_target_deg` (negative: never reached), `peak_deg_s`, `settle_s` from the move command, `arrival_deg_s` on entering the fudge band, and the firmware's verdict from `/diagnostics` (`position_timeouts`, `reached_target_deg`); `moves` totals: completed, timed out, never reached, `rest_error_deg` max and mean per direction, `overshoot_max_deg`, the arrival speed range and the coast it implies by the fit |
 
 Notes on the analysis (`ros2_roamadome/bench/analysis.py`, no ROS imports):
 
@@ -313,6 +364,9 @@ Worked example: this is exactly the situation on the bench robot.
   ([docs/bench_results/2026-10-16-no-dome-new-plate.md](docs/bench_results/2026-10-16-no-dome-new-plate.md))
   and with it
   ([docs/bench_results/2026-10-16-with-dome-new-plate.md](docs/bench_results/2026-10-16-with-dome-new-plate.md)).
+- **Position sweep service (2026-10-16 evening).** The bench node's position sweep, the
+  0-crossing wrap allowance and the plugin's plausibility gate were validated on the dome
+  ([docs/bench_results/2026-10-16-position-sweep-service.md](docs/bench_results/2026-10-16-position-sweep-service.md)).
 
 **The 2026-10-16 with-dome report is the calibration reference. These are the values to
 configure** (new plate, dome installed, MaxSpeed 80, MinSpeed 32, SpeedTarget 60, DecelerationScale 250, Fudge 5, Scaling off;
@@ -402,7 +456,10 @@ A run passes when:
   sensor sweep. **Exception:** a single jump of about 20 to 22 deg starting at 355 deg at ±100 %
   is the dead zone near 0, not a sensor fault. The reported angle never shows 359 to 2 deg, so it
   steps from 355 to 4. At 100 % that step reaches the jump threshold of 1.5 x the measured maximum
-  (2026-10-16 with-dome report). A run whose only jumps are of this kind counts as a pass;
+  (2026-10-16 with-dome report). Since `sensor_sweep.wrap_allowance_deg` (10 deg) that step
+  is no longer scored: re-analysed with the allowance, the 2026-10-16 with-dome sweep has 0
+  jumps and `suggested_pass` true, and older runs reproduce unchanged because a `run.json`
+  without the setting gets an allowance of 0;
 - `--check` exits 0.
 
 The speed sweep runs with `speed_sweep.raw_motor` true by default (MaxSpeed 100, SpeedTarget
@@ -526,23 +583,49 @@ used and the result in the bench report.
 `Scaling` adds ramps). The fit is valid only for the values it was measured with, which are
 recorded in each run's `settings_before.json`. Changing any of them, through `device.*`, the
 firmware menu or `#DP` commands, invalidates the fit: re-run (b) to (d).
+**`SpeedTarget` caps `:DPR` as well as position moves** (the firmware clamps the rotate
+percent to it): the calibration reference above was measured at SpeedTarget 100, but the
+position-move tuning in (g) set it to 60, at which the velocity path tops out at about
+3.5 rad/s (200 deg/s, 2026-10-16 position sweep). Before phase 7 either re-run the
+operating-settings speed sweep at SpeedTarget 60 or run the robot at 100 and tune the
+position moves another way (the firmware accepts a per-move speed, `:DPA<deg>,<percent>`,
+which the plugin does not send yet).
 
 **(g) Position-move tuning: `DecelerationScale`, `SpeedTarget` and `Fudge`.** The
 firmware's position move tapers the commanded percent from `SpeedTarget` down to the
 `MinSpeed` floor over the last `DecelerationScale` degrees, then cuts the motor at the
 `Fudge` boundary; the Sabertooth ramp and the dome's inertia carry it on from there. So
 the rest error is the stopping distance at the arrival speed minus the fudge, and the
-settings are determined from two bench measurements (scripts in
-`/home/pi/dome_bench/pos_tune/`, `pos_tune.py` and `pos_tune_analyze.py`, driving the
-controller directly with no controllers loaded):
+settings are determined from two bench measurements. The bench node's **position sweep**
+makes both in one run at the current `device.*` settings (it writes nothing):
 
-1. Stopping-distance curve: steady `:DPR p` for 5 s, then `:DPR0`, for p = 35, 50, 70,
-   100 in both directions; record the travel from the stop command to standstill. On
-   the assembled dome (2026-10-16) it is close to linear, `d_stop = 0.47 s x v - 18
-   deg` (19 deg from 73 deg/s, 46 from 141, 90 from 229, 161 from 392), and symmetric.
-2. Position moves (150 and 40 deg, both directions, several end angles) under candidate
-   settings, measuring the arrival speed at the fudge boundary, the overshoot and the
-   rest error. Choose `DecelerationScale` large enough that the dome has actually slowed
+```bash
+ros2 param set /roamadome device.speed_target 60      # candidate settings, each persists to flash
+ros2 param set /roamadome device.deceleration_scale 250
+ros2 param set /roamadome device.fudge 5
+ros2 service call /roamadome_bench/start_position_sweep std_srvs/srv/Trigger
+# then read position_sweep.json in the run directory: stop_curve.fit, moves.rest_error_deg,
+# moves.arrival_deg_s and moves.coast_from_arrival_deg
+```
+
+(The first measurements, 2026-10-16 afternoon, used `pos_tune.py` and `pos_tune_analyze.py`
+in `/home/pi/dome_bench/pos_tune/`, driving the controller directly with no controllers
+loaded; the sweep service replaced them that evening,
+[docs/bench_results/2026-10-16-position-sweep-service.md](docs/bench_results/2026-10-16-position-sweep-service.md).)
+
+1. Stopping-distance curve: steady `p` for `position_sweep.stop_run_s` (5 s), then 0,
+   for `position_sweep.stop_percents` (35, 50, 70, 100) in both directions; the travel
+   from the first report after the stop command to standstill, against the speed just
+   before it. On the assembled dome (2026-10-16) it is close to linear,
+   `d_stop = 0.47 s x v - 18 deg` (19 deg from 73 deg/s, 46 from 141, 90 from 229, 161
+   from 392), and symmetric. **Percents above `SpeedTarget` are clamped by the firmware**
+   (the node warns): at SpeedTarget 60 the curve only reaches 200 deg/s
+   (`0.41 s x v - 14 deg` over 90 to 220 deg/s), so set `device.speed_target` 100 for the
+   full curve.
+2. Position moves (`position_sweep.moves_deg`: 150, 40, 90, 20, 120 and 60 deg, each in
+   both directions, from wherever the dome rests) under candidate settings, measuring the
+   arrival speed at the fudge boundary, the overshoot and the rest error. Choose
+   `DecelerationScale` large enough that the dome has actually slowed
    to the floor speed before the boundary (250, the maximum, on this dome: its response
    time is 1.5 s, so 50 deg is far too short), `SpeedTarget` for the cruise speed you
    want on long moves (it does not change the accuracy once the taper is long enough;
@@ -561,6 +644,8 @@ Measured on the assembled dome, new plate, MinSpeed 32:
 | 45 | 250 | 8 | +6, -6, 0, -8, +2, -10 |
 | 60 | 250 | 10 | -2, -5, -2, -1, -5, -2 |
 | **60** | **250** | **5** | **+2, -6, +2, -5, +3, -5, +2, -4, -3, +2, +4, -4** (12 moves, 20 to 150 deg) |
+| 60 | 250 | 5 | 0, -5, +9, -2, +5, -7, +9, -3, +4, -3, +7, -5 (position sweep service, same evening; arrival 52-79 deg/s, predicted coast 8-18 deg) |
+| 60 | 250 | 5 | +10, -3, +16, -3, +10, -4, +11, -2, +6, -4, +9, -6 (service re-run from 257 deg: every angle-increasing move ended in the fast 299-354 deg sector, arriving at 69-88 deg/s; the rest error depends on the end angle until the friction is evened out) |
 
 Fudge versus `MinSpeed` (dome installed, S 60, D 250): the arrival speed at the
 boundary is the floor speed, so a smaller fudge only works with a lower floor, and
@@ -590,12 +675,16 @@ serial port path as `hardware_id`:
 | Status | OK | WARN | ERROR |
 |--------|----|------|-------|
 | `roamadome: link` | Position reports flowing | No report yet, or none for 0.5 s | Serial port closed, or `READY` seen while active (the controller rebooted) |
-| `roamadome: sensor` | Sensor error count steady | Count grew between the last two `#DPSTATUS` polls | |
+| `roamadome: sensor` | Sensor error count steady | Count grew between the last two `#DPSTATUS` polls, or the plausibility gate rejected a report within the last 10 s | |
 | `roamadome: motion` | No timeout outstanding | `ERROR: DOME POSITION TIMEOUT` more than 5 s ago and no `REACHED TARGET` / `REACHED HOME` since | `ERROR: DOME POSITION TIMEOUT` within the last 5 s |
 
 Values include the report and poll counters, the firmware's sensor and packet
-serial error counts, the last accepted `:DPR` percent, the last target and home
-reached, position timeouts, out-of-range rejections and the current command mode.
+serial error counts, the plausibility gate's `reports_held`, `reports_rejected`,
+`jumps_confirmed` and `last_rejection_age_s`, the last accepted `:DPR` percent, the last
+target and home reached, position timeouts, out-of-range rejections and the current
+command mode. `position_reporting_enabled` on `roamadome: link` is true once the
+`#DPREPORT` ack has been seen **or any position report has arrived**, so it no longer
+reads false for a whole session when the startup ack is missed.
 `roamadome: motion` also reports the settings-write pipeline: `settings_writes_pending`
 (ack-tracked `#DP...` writes queued, plus one waiting for its ack), `settings_acks`
 (completed by `Write Settings` + `Updated` or by `Unchanged`) and `settings_ack_timeouts`
@@ -657,6 +746,21 @@ ros2 control set_controller_state dome_position_controller active
 
 Commands can be published to controller topics or issued via the controller manager interface.
 
+- **Position mode.** When a position controller claims the joint, the interface sets the
+  command interface to the dome's current angle and sends nothing until the controller
+  writes a different value (more than 0.01 rad away), so activating a controller no longer
+  sends the dome to 0 deg. A `NaN` command (a controller that writes `NaN`) sends nothing.
+  In velocity mode the command starts at 0 and the first non-zero value is sent.
+- **A firmware position move cannot be cancelled from the host.** `:DPA` hands the move to
+  the firmware's target mode, and `:DPR0` (what the interface sends on a mode switch, a bench
+  stop or deactivation) does not clear that mode: a non-zero `:DPR` overrides the move only
+  while it is non-zero, and at `:DPR0` the firmware resumes it. A move therefore always ends
+  by itself, at `REACHED TARGET` or at the firmware's `device.timeout` without dome movement.
+  Switch controllers, or deactivate, when the dome is at rest. While such a move is
+  outstanding (a `:DPA` sent and no `REACHED TARGET`, `REACHED HOME` or timeout seen yet)
+  the interface refuses non-zero bench drives and settings writes, and logs a WARN when a
+  controller starts.
+
 ## Setting up the Hardware Device
 
 Before using this interface:
@@ -686,6 +790,7 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `enable_bench_mode` | bool | `false` | Create the raw drive service `~/bench/drive` (see [Bench mode](#bench-mode)); normally set by the `dome_bench` launch argument |
 | `bench_heartbeat_timeout_ms` | uint32 | `1500` | Send `:DPR0` if no bench drive call arrives within this time while a bench drive is active, must be > 0 |
 | `status_poll_interval_ms` | uint32 | `10000` | Interval for the `#DPSTATUS` poll that feeds `/diagnostics`; `0` disables |
+| `max_plausible_deg_s` | double | `0.0` | Plausibility gate for position reports (see [Velocity estimate and telemetry](#velocity-estimate-and-telemetry)): hold a report that implies a faster step than this until the next report confirms it; `0` disables. `r2_bringup` sets 600 |
 | `report_gap_warn_ms` | uint32 | `250` | Log a WARN with the measured length whenever two position reports are further apart than this, and count it in the `roamadome: link` diagnostic (`report_gaps`, `last_report_gap_s`); `0` disables |
 | `config_refresh_interval_ms` | uint32 | `60000` | Interval for the periodic `#DPCONFIG` refresh that re-syncs `device.*`; deferred while the dome moves; `0` disables |
 | `serial_baud_sweep` | bool | `false` | At startup, try every supported baud and send `#DPSERIALBAUD<serial_baud>` at each. Needed on a UART link whose rate is unknown; pointless on the USB CDC link (ESP32-S3 USB Serial/JTAG), which ignores baud |

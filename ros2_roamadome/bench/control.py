@@ -29,6 +29,8 @@ DRIVE_LOCK_TIMEOUT_S = 3.0
 SERVICE_TIMEOUT_S = 2.0
 
 REFUSED_STOPPING = 'the sweep is stopping: non-zero percent refused'
+REFUSED_MOVE_ACTIVE = 'a bench move is being kept alive: release it with percent 0 first'
+REFUSED_DRIVE_ACTIVE = 'a non-zero percent is being kept alive: send 0 before a move'
 
 
 class SweepClaim:
@@ -58,23 +60,30 @@ class SweepClaim:
 
 class DriveGate:
     """
-    Serialise every bench drive call and remember the percent to keep alive.
+    Serialise every bench drive call and remember what to keep alive.
 
-    ``call(percent, timeout)`` performs one service call and returns
-    ``(ok, message)``. Once :meth:`begin_stopping` has been called (abort,
-    cleanup, signal) only percent 0 is sent until :meth:`arm` starts the next
-    sweep, so neither the worker nor the heartbeat can restart the dome.
+    ``call(percent, timeout)`` performs one bench/drive call and returns
+    ``(ok, message)``; ``call_move(target_deg, timeout)`` performs one
+    bench/move call (optional). The gate remembers the percent, or the move
+    target, that the heartbeat must repeat. Once :meth:`begin_stopping` has been
+    called (abort, cleanup, signal) only percent 0 is sent until :meth:`arm`
+    starts the next sweep, so neither the worker nor the heartbeat can restart
+    the dome. Percent 0 also releases a move claim (the firmware finishes a
+    move on its own; the host cannot cancel it).
     """
 
-    def __init__(self, call):
+    def __init__(self, call, call_move=None):
         self._call = call
+        self._call_move = call_move
         self._lock = threading.Lock()
         self._percent = 0
+        self._move = None
         self._stopping = threading.Event()
 
     def arm(self):
         """Start of a sweep: nothing commanded, non-zero percents allowed."""
         self._percent = 0
+        self._move = None
         self._stopping.clear()
 
     def begin_stopping(self):
@@ -89,6 +98,11 @@ class DriveGate:
     def percent(self):
         return self._percent
 
+    @property
+    def move_target(self):
+        """Return the bench move target being kept alive, or None."""
+        return self._move
+
     def send(self, percent, lock_timeout=DRIVE_LOCK_TIMEOUT_S, timeout=SERVICE_TIMEOUT_S):
         """Command ``percent`` (worker). Returns ``(ok, message)``."""
         percent = int(percent)
@@ -99,10 +113,34 @@ class DriveGate:
         try:
             if percent != 0 and self._stopping.is_set():
                 return False, REFUSED_STOPPING
+            if percent != 0 and self._move is not None:
+                return False, REFUSED_MOVE_ACTIVE
             self._percent = percent
+            if percent == 0:
+                self._move = None   # releases the move claim
             ok, message = self._call(percent, timeout)
             if not ok:
                 self._percent = 0
+            return ok, message
+        finally:
+            self._lock.release()
+
+    def move(self, target_deg, lock_timeout=DRIVE_LOCK_TIMEOUT_S, timeout=SERVICE_TIMEOUT_S):
+        """Command a firmware position move to ``target_deg``; return ``(ok, message)``."""
+        target_deg = int(target_deg) % 360
+        if self._call_move is None:
+            return False, 'bench move is not supported'
+        if self._stopping.is_set():
+            return False, REFUSED_STOPPING
+        if not self._lock.acquire(timeout=lock_timeout):
+            return False, 'drive lock timeout'
+        try:
+            if self._stopping.is_set():
+                return False, REFUSED_STOPPING
+            if self._percent != 0:
+                return False, REFUSED_DRIVE_ACTIVE
+            ok, message = self._call_move(target_deg, timeout)
+            self._move = target_deg if ok else None
             return ok, message
         finally:
             self._lock.release()
@@ -119,10 +157,16 @@ class DriveGate:
             return None  # the worker is sending, which refreshes the plugin heartbeat
         try:
             if self._stopping.is_set():
-                if self._percent == 0:
+                if self._percent == 0 and self._move is None:
                     return None
                 self._percent = 0
+                self._move = None
                 return self._call(0, timeout)
+            if self._move is not None:
+                ok, message = self._call_move(self._move, timeout)
+                if not ok:
+                    self._move = None
+                return ok, message
             if self._percent == 0:
                 return None
             ok, message = self._call(self._percent, timeout)
@@ -138,6 +182,7 @@ class DriveGate:
         locked = self._lock.acquire(timeout=lock_timeout)
         try:
             self._percent = 0
+            self._move = None
             return self._call(0, timeout)
         finally:
             if locked:
@@ -164,13 +209,30 @@ def validate_percents(name, values):
     return errors
 
 
+def validate_moves(name, values):
+    """
+    Errors for a move list: non-zero integers in -179..179, at least one.
+
+    The firmware takes the short way round, so a move of 180 deg or more would
+    not travel in the direction of its sign and the analysis could not score it.
+    """
+    errors = []
+    values = list(values or [])
+    if not values:
+        return ['%s is empty' % name]
+    for v in values:
+        if isinstance(v, bool) or not isinstance(v, int) or v == 0 or not -179 <= v <= 179:
+            errors.append('%s: %r is not a non-zero integer in -179..179' % (name, v))
+    return errors
+
+
 def validate_config(get):
     """
     Return the list of errors in the bench parameters; ``get(name)`` reads a value.
 
     Rejected: heartbeat_period_s outside (0, HEARTBEAT_MAX_S]; bad percent
     lists; negative settle times; non-positive durations and thresholds;
-    min_measure_s greater than max_measure_s.
+    min_measure_s greater than max_measure_s; bad move lists.
     """
     errors = []
     heartbeat = get('heartbeat_period_s')
@@ -179,12 +241,18 @@ def validate_config(get):
                       '1.5 s by default), got %r' % (HEARTBEAT_MAX_S, heartbeat))
     errors += validate_percents('sensor_sweep.percents', get('sensor_sweep.percents'))
     errors += validate_percents('speed_sweep.percents', get('speed_sweep.percents'))
-    for name in ('sensor_sweep.settle_s', 'speed_sweep.settle_s'):
+    errors += validate_percents('position_sweep.stop_percents',
+                                get('position_sweep.stop_percents'))
+    errors += validate_moves('position_sweep.moves_deg', get('position_sweep.moves_deg'))
+    for name in ('sensor_sweep.settle_s', 'speed_sweep.settle_s',
+                 'sensor_sweep.wrap_allowance_deg'):
         if get(name) < 0.0:
             errors.append('%s must be >= 0, got %r' % (name, get(name)))
     for name in ('sensor_sweep.duration_s', 'speed_sweep.min_measure_s',
                  'speed_sweep.max_measure_s', 'speed_sweep.stall_deg_s', 'speed_sweep.stall_s',
-                 'sensor_sweep.max_plausible_deg_s', 'velocity_window_s'):
+                 'sensor_sweep.max_plausible_deg_s', 'velocity_window_s',
+                 'position_sweep.stop_run_s', 'position_sweep.settle_s',
+                 'position_sweep.move_timeout_s', 'position_sweep.stopped_deg_s'):
         if not get(name) > 0.0:
             errors.append('%s must be > 0, got %r' % (name, get(name)))
     if get('speed_sweep.min_measure_s') > get('speed_sweep.max_measure_s'):
@@ -228,6 +296,54 @@ def settings_ack_state(baseline, current, writes):
     if pending == 0 and acks - base_acks >= writes:
         return 'acked'
     return 'waiting'
+
+
+def move_outcome(before, after, fresh=True, move_age_s=None):
+    """
+    Return what the firmware reported for one bench move.
+
+    ``before`` and ``after`` are the ``roamadome: motion`` value dicts before the
+    move and after standstill; ``fresh`` says whether ``after`` was published after
+    the standstill, and ``move_age_s`` how long before ``after`` the move was
+    commanded. Returns ``position_timeouts`` (new firmware position timeouts
+    during the move), ``reached_target_deg`` (the angle of a REACHED TARGET that
+    completed during this move, else None) and ``status_seen`` (False when no
+    fresh status arrived, in which case the other two are unknown and None).
+    """
+    def count(values, key):
+        try:
+            return int(values.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    def age(values):
+        try:
+            return float(values.get('last_move_completed_age_s'))
+        except (TypeError, ValueError):
+            return None
+
+    if not after or not fresh:
+        return {'status_seen': False, 'position_timeouts': None, 'reached_target_deg': None}
+    timeouts_before = count(before or {}, 'position_timeouts')
+    timeouts_after = count(after, 'position_timeouts')
+    timeouts = None
+    if timeouts_before is not None and timeouts_after is not None:
+        timeouts = max(0, timeouts_after - timeouts_before)
+    reached = None
+    before_deg = (before or {}).get('last_target_reached_deg')
+    after_deg = after.get('last_target_reached_deg')
+    completed_age = age(after)
+    # REACHED TARGET counts only if it completed during this move: the status is
+    # published at 1 Hz, so allow one period of slack on the move's age.
+    during_move = (completed_age is not None and move_age_s is not None and
+                   0.0 <= completed_age <= move_age_s + 1.5)
+    if after_deg not in (None, 'unknown') and (
+            (after_deg != before_deg and (move_age_s is None or during_move)) or during_move):
+        try:
+            reached = int(after_deg)
+        except ValueError:
+            reached = None
+    return {'status_seen': True, 'position_timeouts': timeouts, 'reached_target_deg': reached}
 
 
 # ---------------------------------------------------------------------------

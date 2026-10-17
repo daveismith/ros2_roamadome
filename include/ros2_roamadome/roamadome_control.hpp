@@ -4,6 +4,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "astromech_msgs/srv/dome_bench_drive.hpp"
+#include "astromech_msgs/srv/dome_bench_move.hpp"
 #include "astromech_msgs/msg/dome_telemetry.hpp"
 #include "diagnostic_msgs/msg/diagnostic_array.hpp"
 
@@ -11,6 +12,7 @@
 #include "ros2_roamadome/dome_diagnostics.hpp"
 #include "ros2_roamadome/firmware_line_classifier.hpp"
 #include "ros2_roamadome/position_tracker.hpp"
+#include "ros2_roamadome/report_plausibility_gate.hpp"
 #include "ros2_roamadome/visibility_control.h"
 #include "ros2_roamadome/roamadome_serial_port.hpp"
 #include "hardware_interface/actuator_interface.hpp"
@@ -23,6 +25,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -199,6 +202,10 @@ private:
   void handleBenchDrive(
     const std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Request> request,
     std::shared_ptr<astromech_msgs::srv::DomeBenchDrive::Response> response);
+  void handleBenchMove(
+    const std::shared_ptr<astromech_msgs::srv::DomeBenchMove::Request> request,
+    std::shared_ptr<astromech_msgs::srv::DomeBenchMove::Response> response);
+  bool benchRequestAllowed(std::string * reason, bool starts_motion) const;
   void serviceBenchDrive();
   bool stopBenchDrive(const char * reason);  // false if :DPR0 could not be sent; state kept
   void resetBenchState();
@@ -206,6 +213,7 @@ private:
 
   // Telemetry and velocity estimation
   void handlePositionReport(uint32_t degrees, double radians);
+  void applyAcceptedReport(const ReportPlausibilityGate::Report & report);
 
   // Diagnostics
   void handleClassifiedLine(const std::string & line);
@@ -242,8 +250,15 @@ private:
   // Atomic: written by the controller manager thread (mode switch), read by the
   // bench drive service callback on the executor thread.
   std::atomic<CommandMode> currentMode_{CommandMode::IDLE};
-  double lastSentPosition_ = -1.0;  // Track last sent position to avoid redundant commands
-  double lastSentVelocity_ = 0.0;   // Track last sent velocity to avoid redundant commands
+  // Last position / velocity command sent, NaN when none since the mode was entered.
+  double lastSentPosition_ = std::numeric_limits<double>::quiet_NaN();
+  double lastSentVelocity_ = std::numeric_limits<double>::quiet_NaN();
+  // A :DPA (bench move or position controller) has been sent and the firmware has
+  // not yet reported REACHED TARGET / REACHED HOME / a position timeout. The host
+  // cannot cancel such a move (:DPR0 does not clear the firmware's target mode and
+  // a non-zero :DPR only overrides it while non-zero), so while it is outstanding
+  // no bench drive may start. Set from the write path, cleared from the read path.
+  std::atomic<bool> firmwareMoveOutstanding_{false};
   double maxSpeedRadPerSec_ = 3.14;  // Default: ~180°/s (configurable via parameter)
   uint32_t serialSectionFlushTimeoutMs_ = 500;
 
@@ -334,11 +349,16 @@ private:
   bool enableBenchMode_ = false;
   uint32_t benchHeartbeatTimeoutMs_ = 1500;
   rclcpp::Service<astromech_msgs::srv::DomeBenchDrive>::SharedPtr benchDriveService_;
+  rclcpp::Service<astromech_msgs::srv::DomeBenchMove>::SharedPtr benchMoveService_;
   mutable std::mutex bench_mutex_;
   rclcpp::Clock throttleClock_{RCL_STEADY_TIME};
   bool benchActive_ = false;
   int32_t benchPendingPercent_ = 0;
   int32_t benchLastSentPercent_ = 0;
+  // A bench position move (:DPA). The firmware runs it to completion on its own;
+  // the host can only release the bench claim, not cancel the move.
+  std::optional<uint16_t> benchMoveTarget_;
+  bool benchMoveSent_ = false;
   std::chrono::steady_clock::time_point benchLastCallTime_;
 
   // Telemetry and velocity estimation (docs/dome_diagnostics_plan.md, phase 1).
@@ -348,6 +368,9 @@ private:
   bool publishTelemetry_ = false;
   double velocityWindowS_ = 0.5;
   PositionTracker positionTracker_;
+  // Plausibility gate (max_plausible_deg_s, 0 = off); only touched from the read path.
+  double maxPlausibleDegS_ = 0.0;
+  ReportPlausibilityGate plausibilityGate_;
   uint32_t telemetrySequence_ = 0;
   std::atomic<int8_t> lastCommandedPercent_{0};
   std::atomic<uint8_t> telemetryCommandMode_{0};

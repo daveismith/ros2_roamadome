@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -183,6 +184,27 @@ protected:
   {
     return controller_->perform_command_mode_switch({"dome_joint/velocity"}, {});
   }
+  hardware_interface::return_type switchToPositionForTest()
+  {
+    return controller_->perform_command_mode_switch({"dome_joint/position"}, {});
+  }
+  void setCommandPositionForTest(double radians) {controller_->cmd_position_ = radians;}
+  void setCommandVelocityForTest(double rad_s) {controller_->cmd_velocity_ = rad_s;}
+  double commandPositionForTest() const {return controller_->cmd_position_;}
+  astromech_msgs::srv::DomeBenchMove::Response benchMoveForTest(int degrees)
+  {
+    auto request = std::make_shared<astromech_msgs::srv::DomeBenchMove::Request>();
+    request->target_deg = static_cast<uint16_t>(degrees);
+    auto response = std::make_shared<astromech_msgs::srv::DomeBenchMove::Response>();
+    controller_->handleBenchMove(request, response);
+    return *response;
+  }
+  bool benchMoveActiveForTest() const
+  {
+    std::lock_guard<std::mutex> lock(controller_->bench_mutex_);
+    return controller_->benchMoveTarget_.has_value();
+  }
+  void setPositionStateForTest(double radians) {controller_->position_ = radians;}
   uint8_t telemetryModeForTest() const {return controller_->telemetryCommandMode_.load();}
   int8_t commandedPercentForTest() const {return controller_->lastCommandedPercent_.load();}
 
@@ -2916,6 +2938,290 @@ TEST_F(RoamadomeControlTest, PositionReportGap_CountedInDiagnostics)
   EXPECT_GT(state.last_report_gap_s, 0.2);
   feed(13);
   EXPECT_EQ(diagnosticsStateForTest().report_gaps, 1u);
+}
+
+// ---- Bench move (position-move bench, ~/bench/move) ----
+
+TEST_F(BenchModeTest, BenchMove_SendsDpaOnceKeepAliveIsSilentAndZeroReleases)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  const auto first = benchMoveForTest(120);
+  EXPECT_TRUE(first.success) << first.message;
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_BENCH);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA120", 1000));
+  EXPECT_EQ(commandedPercentForTest(), 0);  // a move is not a percent
+  EXPECT_TRUE(benchMoveActiveForTest());
+
+  // Keep-alive with the same target: nothing new on the wire.
+  const auto again = benchMoveForTest(120);
+  EXPECT_TRUE(again.success);
+  EXPECT_NE(again.message.find("kept alive"), std::string::npos);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPA120"), 1);
+
+  // A new target is sent.
+  EXPECT_TRUE(benchMoveForTest(200).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA200", 1000));
+
+  // While the move is claimed: settings writes and non-zero drives are refused.
+  const auto result = setDeviceParametersForTest({rclcpp::Parameter("device.max_speed", 60)});
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("bench move"), std::string::npos);
+  const auto drive = benchDriveForTest(20);
+  EXPECT_FALSE(drive.success);
+  EXPECT_NE(drive.message.find("bench move"), std::string::npos);
+
+  // Percent 0 releases the claim without sending anything.
+  const auto release = benchDriveForTest(0);
+  EXPECT_TRUE(release.success);
+  EXPECT_NE(release.message.find("released"), std::string::npos);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_FALSE(benchStateForTest().active);
+  EXPECT_FALSE(benchMoveActiveForTest());
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_IDLE);
+  EXPECT_EQ(firmware.count(":DPR0"), 0);
+}
+
+TEST_F(BenchModeTest, BenchMove_HeartbeatExpiryReleasesTheClaimWithoutAStop)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_TRUE(benchMoveForTest(90).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA90", 1000));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(kPastTimeoutMs));
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_FALSE(benchStateForTest().active);
+  EXPECT_FALSE(benchMoveActiveForTest());
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_IDLE);
+  // :DPR0 would not cancel a firmware move, so none is sent for a move alone.
+  EXPECT_EQ(firmware.count(":DPR0"), 0);
+}
+
+TEST_F(BenchModeTest, BenchMove_RejectedDuringADriveOutOfRangeOrInactive)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_FALSE(benchMoveForTest(360).success);
+
+  ASSERT_TRUE(benchDriveForTest(20).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR20", 1000));
+  const auto during_drive = benchMoveForTest(10);
+  EXPECT_FALSE(during_drive.success);
+  EXPECT_NE(during_drive.message.find("bench drive is active"), std::string::npos);
+  ASSERT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+
+  queueAckCommandForTest();
+  const auto in_flight = benchMoveForTest(10);
+  EXPECT_FALSE(in_flight.success);
+  EXPECT_NE(in_flight.message.find("settings write is in flight"), std::string::npos);
+
+  setLifecycleActiveForTest(false);
+  EXPECT_FALSE(benchMoveForTest(10).success);
+}
+
+TEST_F(BenchModeTest, ModeSwitchToVelocity_ReleasesABenchMove)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_TRUE(benchMoveForTest(45).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA45", 1000));
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  EXPECT_FALSE(benchMoveActiveForTest());
+  EXPECT_FALSE(benchStateForTest().active);
+  EXPECT_EQ(telemetryModeForTest(), astromech_msgs::msg::DomeTelemetry::COMMAND_MODE_VELOCITY);
+}
+
+// ---- Position mode switch: hold the current angle, never :DPA0 by default ----
+
+TEST_F(BenchModeTest, PositionModeSwitch_HoldsCurrentAngleInsteadOfSendingDpa0)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  setPositionStateForTest(100.0 * M_PI / 180.0);
+  ASSERT_EQ(switchToPositionForTest(), hardware_interface::return_type::OK);
+  EXPECT_NEAR(commandPositionForTest(), 100.0 * M_PI / 180.0, 1e-9);
+
+  writeOnce();
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPA0"), 0);
+  EXPECT_EQ(firmware.count(":DPA100"), 0);
+
+  // The first real command is sent.
+  setCommandPositionForTest(1.0);  // 57.3 deg
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA57", 1000));
+
+  // A NaN command (an unset interface) sends nothing.
+  setCommandPositionForTest(std::numeric_limits<double>::quiet_NaN());
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPA57"), 1);
+}
+
+// ---- Plausibility gate on the read path ----
+
+TEST_F(RoamadomeControlTest, PositionReports_GateRejectsAGlitchAndConfirmsARealJump)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["serial_port"] = pty.slavePath();
+  info.hardware_parameters["startup_default_timeout_ms"] = "200";
+  info.hardware_parameters["startup_report_timeout_ms"] = "200";
+  info.hardware_parameters["startup_setup_timeout_ms"] = "200";
+  info.hardware_parameters["startup_retries"] = "1";
+  info.hardware_parameters["max_plausible_deg_s"] = "360";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  ASSERT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+
+  AckFirmware firmware(&pty);
+  rclcpp_lifecycle::State previous_state(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, "inactive");
+  ASSERT_EQ(
+    controller_->on_configure(previous_state), hardware_interface::CallbackReturn::SUCCESS);
+  setLifecycleActiveForTest(true);
+
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(0.028);
+  auto feed = [&](int degrees) {
+      pty.writeText("DOME POSITION: " + std::to_string(degrees) + "\n");
+      std::this_thread::sleep_for(std::chrono::milliseconds(28));
+      ASSERT_EQ(controller_->read(now, period), hardware_interface::return_type::OK);
+    };
+  auto position_deg = [&]() {return positionStateForTest() * 180.0 / M_PI;};
+
+  feed(100);
+  feed(101);
+  feed(102);
+  EXPECT_NEAR(position_deg(), 102.0, 1e-9);
+  // A flowing report proves reporting is enabled, startup ack or not.
+  EXPECT_TRUE(diagnosticsStateForTest().position_reporting_enabled);
+
+  // One report 48 deg off the track is held, then dropped when 103 follows.
+  feed(150);
+  EXPECT_NEAR(position_deg(), 102.0, 1e-9);
+  EXPECT_EQ(diagnosticsStateForTest().reports_held, 1u);
+  feed(103);
+  EXPECT_NEAR(position_deg(), 103.0, 1e-9);
+  EXPECT_EQ(diagnosticsStateForTest().reports_rejected, 1u);
+  EXPECT_TRUE(diagnosticsStateForTest().last_report_rejected.has_value());
+
+  // A real jump: two reports agree with each other.
+  feed(200);
+  EXPECT_NEAR(position_deg(), 103.0, 1e-9);
+  feed(201);
+  EXPECT_NEAR(position_deg(), 201.0, 1e-9);
+  EXPECT_EQ(diagnosticsStateForTest().jumps_confirmed, 1u);
+  EXPECT_EQ(diagnosticsStateForTest().reports_held, 2u);
+  EXPECT_EQ(diagnosticsStateForTest().reports_rejected, 1u);
+  // Every raw report was counted for the link status.
+  EXPECT_EQ(diagnosticsStateForTest().position_reports, 7u);
+}
+
+TEST_F(BenchModeTest, BenchMove_OutstandingFirmwareMoveBlocksDrivesUntilReached)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_TRUE(benchMoveForTest(200).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA200", 1000));
+  // Released early (the client gave up): the firmware is still moving.
+  EXPECT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+  const auto drive = benchDriveForTest(20);
+  EXPECT_FALSE(drive.success);
+  EXPECT_NE(drive.message.find("still outstanding"), std::string::npos);
+  const auto result = setDeviceParametersForTest({rclcpp::Parameter("device.max_speed", 60)});
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("outstanding"), std::string::npos);
+  // A new move may retarget it.
+  EXPECT_TRUE(benchMoveForTest(210).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA210", 1000));
+  EXPECT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+
+  // The firmware reports the end of the move: drives are allowed again.
+  pty.writeText("REACHED TARGET: 205\n");
+  const rclcpp::Time now(0, 0, RCL_SYSTEM_TIME);
+  for (int cycle = 0; cycle < 6; ++cycle) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(controller_->read(now, rclcpp::Duration::from_seconds(0.02)),
+      hardware_interface::return_type::OK);
+  }
+  EXPECT_TRUE(benchDriveForTest(20).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR20", 1000));
+  EXPECT_TRUE(benchDriveForTest(0).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+}
+
+TEST_F(BenchModeTest, VelocityModeSwitch_SendsFirstNonZeroCommandOnly)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPR0"), 0);   // 0 is not re-sent: the dome is stopped
+  setCommandVelocityForTest(1.0);          // 1 rad/s of 3.14 -> 32 %
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR32", 1000));
+  setCommandVelocityForTest(0.0);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
 }
 
 }  // namespace ros2_roamadome
