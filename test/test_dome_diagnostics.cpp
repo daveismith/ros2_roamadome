@@ -88,6 +88,48 @@ TEST(DomeDiagnostics, ReportGapsAreCountedAndReported)
   EXPECT_EQ(value(find(statuses, "roamadome: link"), "last_report_gap_s"), "0.367");
 }
 
+TEST(DomeDiagnostics, FlowingReportsProveReportingIsEnabled)
+{
+  // The startup #DPREPORT ack can be missed (or wiped by the activation reset);
+  // a report that arrives is proof enough.
+  DomeDiagnosticsState state;
+  EXPECT_FALSE(state.position_reporting_enabled);
+  recordPositionReport(&state, at(1.0));
+  EXPECT_TRUE(state.position_reporting_enabled);
+  auto statuses = buildDomeDiagnostics(state, healthyReadings(), {}, at(1.1));
+  EXPECT_EQ(value(find(statuses, "roamadome: link"), "position_reporting_enabled"), "true");
+  // An explicit "Position Reporting Disabled" still turns it off.
+  applyFirmwareLine(&state, classifyFirmwareLine("Position Reporting Disabled"), at(2.0), true);
+  EXPECT_FALSE(state.position_reporting_enabled);
+}
+
+TEST(DomeDiagnostics, SensorWarnsAfterARejectedReportThenClears)
+{
+  DomeDiagnosticsState state;
+  recordPositionReport(&state, at(1.0));
+  state.reports_held = 2;
+  state.reports_rejected = 1;
+  state.jumps_confirmed = 1;
+  state.last_report_rejected = at(1.0);
+
+  auto statuses = buildDomeDiagnostics(state, healthyReadings(), {}, at(4.0));
+  const auto & sensor = find(statuses, "roamadome: sensor");
+  EXPECT_EQ(sensor.level, DiagnosticStatus::WARN);
+  EXPECT_NE(sensor.message.find("implausible position report rejected"), std::string::npos);
+  EXPECT_EQ(value(sensor, "reports_held"), "2");
+  EXPECT_EQ(value(sensor, "reports_rejected"), "1");
+  EXPECT_EQ(value(sensor, "jumps_confirmed"), "1");
+  EXPECT_EQ(value(sensor, "last_rejection_age_s"), "3.0");
+
+  statuses = buildDomeDiagnostics(state, healthyReadings(), {}, at(12.0));
+  EXPECT_EQ(find(statuses, "roamadome: sensor").level, DiagnosticStatus::OK);
+
+  // Never rejected: no warning, "never" age.
+  DomeDiagnosticsState clean;
+  statuses = buildDomeDiagnostics(clean, healthyReadings(), {}, at(1.0));
+  EXPECT_EQ(value(find(statuses, "roamadome: sensor"), "last_rejection_age_s"), "never");
+}
+
 TEST(DomeDiagnostics, LinkWarnsWithoutReportsAndWhenStale)
 {
   DomeDiagnosticsState state;

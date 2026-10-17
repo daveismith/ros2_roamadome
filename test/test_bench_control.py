@@ -162,6 +162,85 @@ def test_gate_force_stop_takes_the_lock_when_free_and_sends_zero_anyway_when_hel
 
 
 # ---------------------------------------------------------------------------
+# DriveGate: bench moves
+# ---------------------------------------------------------------------------
+
+class FakeMove:
+    def __init__(self, ok=True, message='move ok'):
+        self.calls = []
+        self.ok = ok
+        self.message = message
+
+    def __call__(self, target_deg, timeout):
+        self.calls.append(target_deg)
+        return self.ok, self.message
+
+
+def test_gate_move_is_kept_alive_by_the_heartbeat_and_released_by_zero():
+    drive, move = FakeDrive(), FakeMove()
+    gate = control.DriveGate(drive, move)
+    gate.arm()
+    assert gate.move(120) == (True, 'move ok')
+    assert gate.move_target == 120
+    assert gate.heartbeat() == (True, 'move ok')      # keep-alive repeats the target
+    assert move.calls == [120, 120]
+    assert gate.move(480) == (True, 'move ok')        # wrapped
+    assert move.calls[-1] == 120 and gate.move_target == 120
+    ok, message = gate.send(20)
+    assert not ok and message == control.REFUSED_MOVE_ACTIVE
+    assert drive.calls == []
+    assert gate.send(0) == (True, 'ok')               # releases the claim
+    assert gate.move_target is None
+    assert drive.calls == [0]
+    assert gate.heartbeat() is None
+
+
+def test_gate_move_refused_while_driving_stopping_or_unsupported():
+    drive, move = FakeDrive(), FakeMove()
+    gate = control.DriveGate(drive, move)
+    gate.arm()
+    gate.send(35)
+    assert gate.move(10) == (False, control.REFUSED_DRIVE_ACTIVE)
+    gate.send(0)
+    assert gate.move(10)[0]
+    gate.begin_stopping()
+    assert gate.move(20) == (False, control.REFUSED_STOPPING)
+    assert gate.heartbeat() == (True, 'ok')           # stopping: one 0 releases the move
+    assert drive.calls[-1] == 0 and gate.move_target is None
+    assert gate.heartbeat() is None
+    assert control.DriveGate(FakeDrive()).move(10) == (False, 'bench move is not supported')
+
+
+def test_gate_failed_move_is_not_kept_alive():
+    drive, move = FakeDrive(), FakeMove(ok=False, message='a controller is commanding the dome')
+    gate = control.DriveGate(drive, move)
+    gate.arm()
+    assert gate.move(10) == (False, 'a controller is commanding the dome')
+    assert gate.move_target is None
+    assert gate.heartbeat() is None
+
+
+def test_move_outcome_from_motion_status():
+    before = {'position_timeouts': '2', 'last_target_reached_deg': '100',
+              'last_move_completed_age_s': '40.0'}
+    after = {'position_timeouts': '2', 'last_target_reached_deg': '250',
+             'last_move_completed_age_s': '1.2'}
+    assert control.move_outcome(before, after) == {
+        'status_seen': True, 'position_timeouts': 0, 'reached_target_deg': 250}
+    timed_out = {'position_timeouts': '3', 'last_target_reached_deg': '100',
+                 'last_move_completed_age_s': '52.0'}
+    assert control.move_outcome(before, timed_out) == {
+        'status_seen': True, 'position_timeouts': 1, 'reached_target_deg': None}
+    # A move to the same target as the last one still counts if completed recently.
+    same = dict(after, last_target_reached_deg='100')
+    assert control.move_outcome(before, same)['reached_target_deg'] == 100
+    assert control.move_outcome(before, before) == {
+        'status_seen': False, 'position_timeouts': None, 'reached_target_deg': None}
+    assert control.move_outcome({}, {'last_target_reached_deg': 'unknown'}) == {
+        'status_seen': True, 'position_timeouts': None, 'reached_target_deg': None}
+
+
+# ---------------------------------------------------------------------------
 # Parameter validation
 # ---------------------------------------------------------------------------
 
@@ -178,6 +257,13 @@ DEFAULTS = {
     'speed_sweep.max_measure_s': 30.0,
     'speed_sweep.stall_deg_s': 3.0,
     'speed_sweep.stall_s': 2.0,
+    'sensor_sweep.wrap_allowance_deg': 10.0,
+    'position_sweep.stop_percents': [35, 50, 70, 100],
+    'position_sweep.stop_run_s': 5.0,
+    'position_sweep.moves_deg': [150, -150, 40, -40],
+    'position_sweep.settle_s': 1.2,
+    'position_sweep.move_timeout_s': 12.0,
+    'position_sweep.stopped_deg_s': 5.0,
 }
 
 
@@ -208,6 +294,21 @@ def test_bad_percent_lists_are_rejected_not_fixed():
     assert errors_with(speed_sweep__percents=[30, 20])
     assert any('ascending' in e for e in errors_with(speed_sweep__percents=[30, 20]))
     assert any('duplicates' in e for e in errors_with(speed_sweep__percents=[20, 20]))
+
+
+def test_position_sweep_parameters_are_validated():
+    assert errors_with(position_sweep__moves_deg=[-359, 359, 1]) == []
+    assert errors_with(position_sweep__moves_deg=[])
+    assert errors_with(position_sweep__moves_deg=[150, 0])
+    assert errors_with(position_sweep__moves_deg=[360])
+    assert errors_with(position_sweep__moves_deg=[True])
+    assert errors_with(position_sweep__stop_percents=[50, 35])
+    assert errors_with(position_sweep__stop_run_s=0.0)
+    assert errors_with(position_sweep__settle_s=0.0)
+    assert errors_with(position_sweep__move_timeout_s=-1.0)
+    assert errors_with(position_sweep__stopped_deg_s=0.0)
+    assert errors_with(sensor_sweep__wrap_allowance_deg=0.0) == []
+    assert errors_with(sensor_sweep__wrap_allowance_deg=-1.0)
 
 
 def test_bad_durations_are_rejected():

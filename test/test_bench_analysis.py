@@ -173,6 +173,27 @@ def test_jumps_skip_same_cycle_pairs_and_tolerate_gaps():
     assert jumps[0]['commanded_percent'] == 20
 
 
+def test_wrap_allowance_applies_only_to_steps_across_zero():
+    # 355 -> 17 at 6.65 rad/s (the dead zone the controller skips near 0): 22 deg in
+    # 33 ms against a 576 deg/s threshold is a jump without the allowance.
+    times = [0.0, 0.0333, 0.0666, 0.0999]
+    jumps, _, _ = analysis.score_jumps(times, [341, 355, 17, 29], 576.02)
+    assert len(jumps) == 1 and jumps[0]['start_deg'] == 355
+    jumps, _, _ = analysis.score_jumps(times, [341, 355, 17, 29], 576.02,
+                                       wrap_allowance_deg=10.0)
+    assert jumps == []
+    # The same 22 deg step away from 0 is still a jump with the allowance.
+    jumps, _, _ = analysis.score_jumps(times, [100, 110, 132, 142], 576.02,
+                                       wrap_allowance_deg=10.0)
+    assert len(jumps) == 1 and jumps[0]['start_deg'] == 110
+    # Downwards across 0 too.
+    jumps, _, _ = analysis.score_jumps(times, [29, 17, 355, 341], 576.02,
+                                       wrap_allowance_deg=10.0)
+    assert jumps == []
+    assert analysis.crosses_zero(355, 22) and analysis.crosses_zero(17, -22)
+    assert not analysis.crosses_zero(100, 22) and not analysis.crosses_zero(0, 5)
+
+
 def test_jump_threshold_boundary():
     # threshold = 720 * 0.033 + 2 = 25.76
     assert not analysis.is_jump(25, 0.033, 720.0)
@@ -516,7 +537,142 @@ def write_run(tmp_path, run_info, rows):
     return run_dir
 
 
-@pytest.mark.parametrize('make_run', [sensor_run, speed_run])
+# ---------------------------------------------------------------------------
+# Position sweep
+# ---------------------------------------------------------------------------
+
+def _rows(index, t0, percent, direction, phase, profile, seq0=0):
+    """Rows from a list of (t_rel, unwrapped_deg) points, quantised like the plugin."""
+    rows = []
+    for k, (t_rel, angle) in enumerate(profile):
+        rows.append(analysis.Sample(
+            t_host=t0 + host_stamp(t_rel), seq=seq0 + k, position_deg=int(round(angle)) % 360,
+            unwrapped_rad=math.radians(angle), velocity_rad_s=float('nan'),
+            commanded_percent=percent, direction=direction, step_index=index, phase=phase))
+    return rows
+
+
+def stop_profile(speed, decel, run_s=1.0):
+    """Constant speed for run_s, then a constant deceleration to rest."""
+    points = []
+    t = 0.0
+    while t < run_s:
+        points.append((t, 'run', speed * t))
+        t += REPORT_DT
+    t_stop = t
+    while True:
+        tau = t - t_stop
+        v = max(0.0, speed - decel * tau)
+        u = speed * t_stop + speed * tau - 0.5 * decel * tau * tau
+        if v <= 0.0:
+            u = speed * t_stop + speed * speed / (2.0 * decel)
+        points.append((t, 'coast', u))
+        if v <= 0.0 and tau > speed / decel + 1.5:
+            break
+        t += REPORT_DT
+    return points
+
+
+def position_run():
+    rows, steps = [], []
+    t = T0
+    # Two stop steps: 200 deg/s (+50 %) and 100 deg/s (-35 %), both stopping at 400 deg/s^2:
+    # stop distances 50 and 12.5 deg.
+    for index, (percent, speed) in enumerate([(50, 200.0), (-35, 100.0)]):
+        sign = -1 if percent > 0 else 1   # positive percent moves the angle down
+        profile = stop_profile(speed, 400.0)
+        run = [(tr, 100 + sign * u) for tr, ph, u in profile if ph == 'run']
+        coast = [(tr, 100 + sign * u) for tr, ph, u in profile if ph == 'coast']
+        direction = 1 if percent > 0 else -1
+        rows += _rows(index, t, percent, direction, analysis.PHASE_RUN, run)
+        rows += _rows(index, t, 0, direction, analysis.PHASE_COAST, coast, seq0=len(run))
+        steps.append({'index': index, 'kind': 'stop', 'percent': percent,
+                      'direction': direction, 'end_reason': 'completed', 'settled': True,
+                      't_stop_wall': t + run[-1][0] + 0.01})
+        t = rows[-1].t_host + 2.0
+    # Two moves: +90 at 120 deg/s overshooting by 3 deg, -40 stopping 2 deg short.
+    for index, (delta, speed, past) in enumerate([(90, 120.0, 3), (-40, 60.0, -2)], start=2):
+        start = 10 if delta > 0 else 103
+        target = (start + delta) % 360
+        direction = 1 if delta > 0 else -1
+        end = start + delta + past * direction
+        profile = []
+        tr = 0.0
+        while abs(speed * tr) < abs(end - start):
+            profile.append((tr, start + direction * speed * tr))
+            tr += REPORT_DT
+        while tr < abs(end - start) / speed + 1.6:
+            profile.append((tr, end))
+            tr += REPORT_DT
+        rows += _rows(index, t, 0, direction, analysis.PHASE_MOVE, profile)
+        steps.append({'index': index, 'kind': 'move', 'percent': 0, 'direction': direction,
+                      'start_deg': start, 'target_deg': target, 'delta_deg': delta,
+                      'end_reason': 'completed', 'settled': True, 't_move_wall': t - 0.02,
+                      'firmware': {'status_seen': True, 'position_timeouts': 0,
+                                   'reached_target_deg': target}})
+        t = rows[-1].t_host + 2.0
+    config = dict(CONFIG, raw_motor=False, stopped_deg_s=5.0, wrap_allowance_deg=10.0,
+                  fudge_deg=5)
+    run_info = {'sweep': 'position', 'run_id': 'synthetic', 'status': 'complete',
+                'config': config, 'steps': steps,
+                'settings_context': {'speed_target': 60, 'deceleration_scale': 250, 'fudge': 5}}
+    return run_info, rows
+
+
+def test_position_sweep_stop_curve_and_moves():
+    run_info, rows = position_run()
+    result = analysis.analyze_position_sweep(run_info, rows)
+    assert result['settings']['fudge'] == 5
+    stops = result['stop_curve']['steps']
+    assert [s['kind'] for s in stops] == ['stop', 'stop']
+    assert all(s['stop_found'] for s in stops)
+    assert stops[0]['speed_before_stop_deg_s'] == pytest.approx(200.0, abs=8.0)
+    assert stops[0]['stop_distance_deg'] == pytest.approx(50.0, abs=4.0)
+    assert stops[1]['speed_before_stop_deg_s'] == pytest.approx(100.0, abs=6.0)
+    assert stops[1]['stop_distance_deg'] == pytest.approx(12.5, abs=3.0)
+    assert 0.2 < stops[0]['stop_time_s'] < 0.75
+    fit = result['stop_curve']['fit']
+    assert fit['points'] == 2
+    # d = v^2 / 800 through (100, 12.5) and (200, 50): slope 0.375 s, intercept -25 deg
+    assert fit['slope'] == pytest.approx(0.375, abs=0.05)
+    assert result['stop_curve']['fit_positive_percent'] is None   # one point per direction
+
+    moves = result['moves']
+    assert moves['count'] == 2 and moves['completed'] == 2 and moves['timed_out'] == 0
+    plus, minus = moves['steps']
+    assert plus['target_deg'] == 100 and plus['rest_error_deg'] == 3
+    assert plus['furthest_past_target_deg'] == 3 and plus['reached_target']
+    assert plus['peak_deg_s'] == pytest.approx(120.0, abs=10.0)
+    assert 0.6 < plus['settle_s'] < 1.1
+    assert plus['arrival_deg_s'] == pytest.approx(120.0, abs=15.0)
+    assert minus['target_deg'] == 63 and minus['rest_error_deg'] == 2
+    assert minus['furthest_past_target_deg'] == -2 and not minus['reached_target']
+    assert moves['never_reached_target'] == 1
+    assert moves['rest_error_deg'] == {'count': 2, 'max_abs': 3, 'mean_abs': 2.5}
+    assert moves['rest_error_deg_angle_increasing']['max_abs'] == 3
+    assert moves['rest_error_deg_angle_decreasing']['max_abs'] == 2
+    assert moves['overshoot_max_deg'] == 3
+    assert moves['firmware_timeouts'] == 0
+    assert result['totals']['jumps'] == 0
+    assert analysis.analyze_run(run_info, rows) == result
+
+
+def test_position_sweep_tolerates_missing_stop_and_empty_move():
+    run_info, rows = position_run()
+    # A stop step whose percent never showed in telemetry and a move with no samples.
+    rows = [r._replace(commanded_percent=0) if r.step_index == 0 else r for r in rows]
+    rows = [r for r in rows if r.step_index != 3]
+    run_info['steps'][0]['end_reason'] = 'stalled'
+    result = analysis.analyze_position_sweep(run_info, rows)
+    first = result['stop_curve']['steps'][0]
+    assert first['stop_found'] is True          # falls back to the first coast sample
+    empty = result['moves']['steps'][1]
+    assert empty['samples'] == 0 and not empty['reached_target']
+    assert result['moves']['completed'] == 2    # end_reason from run.json
+    json.loads(analysis.dumps_json(result))     # NaNs are nulls
+
+
+@pytest.mark.parametrize('make_run', [sensor_run, speed_run, position_run])
 def test_run_dir_reproduces_and_report_cli_checks(tmp_path, make_run):
     run_info, rows = make_run()
     run_dir = write_run(tmp_path, run_info, rows)

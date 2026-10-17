@@ -252,6 +252,7 @@ double recordPositionReport(DomeDiagnosticsState * state, TimePoint now, double 
   }
   ++state->position_reports;
   state->last_position_report = now;
+  state->position_reporting_enabled = true;
   return gap_s;
 }
 
@@ -305,6 +306,11 @@ std::vector<DiagnosticStatus> buildDomeDiagnostics(
     if (state.sensor_errors_increased) {
       raise(&sensor, DiagnosticStatus::WARN, "sensor error count increased since last poll");
     }
+    const double rejection_age = secondsSince(state.last_report_rejected, now);
+    if (state.last_report_rejected.has_value() && rejection_age < options.rejection_warn_s) {
+      raise(&sensor, DiagnosticStatus::WARN,
+        "implausible position report rejected " + formatDouble(rejection_age, 1) + " s ago");
+    }
     if (sensor.message.empty()) {
       sensor.message = state.sensor_errors.has_value() ?
         "sensor error count steady" : "no status poll answered yet";
@@ -313,6 +319,10 @@ std::vector<DiagnosticStatus> buildDomeDiagnostics(
     addValue(&sensor, "sensor_errors", formatOptional(state.sensor_errors));
     addValue(&sensor, "sensor_errors_increased", state.sensor_errors_increased ? "true" : "false");
     addValue(&sensor, "packet_serial_errors", formatOptional(state.packet_serial_errors));
+    addValue(&sensor, "reports_held", std::to_string(state.reports_held));
+    addValue(&sensor, "reports_rejected", std::to_string(state.reports_rejected));
+    addValue(&sensor, "jumps_confirmed", std::to_string(state.jumps_confirmed));
+    addValue(&sensor, "last_rejection_age_s", formatAge(state.last_report_rejected, now));
     addValue(&sensor, "position_deg",
       formatDouble(readings.position_rad * 180.0 / M_PI, 1));
     addValue(&sensor, "velocity_rad_s", formatDouble(readings.velocity_rad_s));
