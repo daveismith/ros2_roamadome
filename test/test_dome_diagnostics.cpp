@@ -279,6 +279,17 @@ TEST(DomeDiagnostics, MotionReportsSettingsWritePipeline)
   EXPECT_EQ(motion.level, DiagnosticStatus::OK);
 }
 
+TEST(DomeDiagnostics, MotionReportsTheEchoedMoveSpeed)
+{
+  DomeDiagnosticsState state;
+  applyFirmwareLine(&state, classifyFirmwareLine("ROTARY DEGREE: 90 speed: 0.40"), at(1.0), true);
+  const auto statuses = buildDomeDiagnostics(state, healthyReadings(), {}, at(1.1));
+  EXPECT_EQ(value(find(statuses, "roamadome: motion"), "last_rotary_target_deg"), "90");
+  EXPECT_EQ(value(find(statuses, "roamadome: motion"), "last_rotary_speed"), "0.4");
+  EXPECT_EQ(value(find(buildDomeDiagnostics(DomeDiagnosticsState(), healthyReadings(), {},
+    at(1.0)), "roamadome: motion"), "last_rotary_speed"), "unknown");
+}
+
 TEST(DomeDiagnostics, MotionValuesTrackAcceptedCommands)
 {
   DomeDiagnosticsState state;

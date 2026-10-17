@@ -194,7 +194,9 @@ private:
   uint32_t normalizeAngleDegrees(double radians) const;
   double radiansToDegrees(double radians) const;
   int32_t velocityToPercentage(double rad_per_sec) const;
-  bool sendPositionCommand(uint32_t degrees);
+  /// ":DPA<deg>[,<percent>]": a non-zero speed_percent wins, else position_move_speed_percent.
+  std::string positionCommandString(uint32_t degrees, uint32_t speed_percent) const;
+  bool sendPositionCommand(uint32_t degrees, uint32_t speed_percent = 0);
   bool sendVelocityCommand(int32_t percentage);
   bool sendStopCommand();
 
@@ -348,6 +350,7 @@ private:
   // and never holds bench_mutex_ across it.
   bool enableBenchMode_ = false;
   uint32_t benchHeartbeatTimeoutMs_ = 1500;
+  uint32_t positionMoveSpeedPercent_ = 0;
   rclcpp::Service<astromech_msgs::srv::DomeBenchDrive>::SharedPtr benchDriveService_;
   rclcpp::Service<astromech_msgs::srv::DomeBenchMove>::SharedPtr benchMoveService_;
   mutable std::mutex bench_mutex_;
@@ -358,6 +361,7 @@ private:
   // A bench position move (:DPA). The firmware runs it to completion on its own;
   // the host can only release the bench claim, not cancel the move.
   std::optional<uint16_t> benchMoveTarget_;
+  uint8_t benchMoveSpeed_ = 0;
   bool benchMoveSent_ = false;
   std::chrono::steady_clock::time_point benchLastCallTime_;
 

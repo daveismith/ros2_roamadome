@@ -104,6 +104,36 @@ activation any more.
 Bench move service: twelve `:DPA` moves sent once each (`Bench move: sent :DPA<n>`),
 keep-alive calls every 0.5 s re-sent nothing, each claim released with percent 0 at rest.
 
+## Per-move speed probe (21:08, `:DPA<deg>,<percent>`)
+
+After the plugin learned to send a per-move speed, a short position sweep with
+`position_sweep.move_speed_percent` 100 (log lines `Bench move: sent :DPA82,100` and so on,
+SpeedTarget still 60) gave the same moves as before: +150 rest +2 peak 101 deg/s, -150 rest
+-5 peak 114, +90 rest +11 peak 81, -90 rest -6 peak 84. A direct serial probe then sent four
+150 deg moves straight to the controller:
+
+| command | firmware echo | peak (deg/s) | rest error |
+|---|---|---|---|
+| `:DPA84` | `ROTARY DEGREE: 84 speed: 0.60` | 88 | +1 |
+| `:DPA235,100` | `ROTARY DEGREE: 235 speed: 1.00` | 76 | +6 |
+| `:DPA31,40` | `ROTARY DEGREE: 31 speed: 0.40` | 112 | +7 |
+| `:DPA188,100+` | `ROTARY DEGREE: 188 speed: 1.00` | 92 | +4 |
+
+The firmware parses and applies the suffix (it sets the move's target speed, exactly what
+`SpeedTarget` does), but the motion does not follow it. The Reeltwo drive's
+`moveDomeToTarget` commands `speed x |distance| / DecelerationScale`, then
+`max(MaxSpeed x that, MinSpeed)`: with DecelerationScale 250 a 150 deg move starts at
+0.6 x speed x 0.8 and is at the 32 % floor after about 50 deg, so the first half-second is
+the only difference and the slow-responding dome never shows it. Consequences:
+
+- `device.speed_target` can go back to 100 for the velocity controller without changing
+  position-move accuracy; the position moves behave as they do now at 60.
+- The per-move speed only matters with a short `DecelerationScale`, where the earlier
+  tuning overshot. It stays available (`position_move_speed_percent`,
+  `DomeBenchMove.speed_percent`, `position_sweep.move_speed_percent`) for that case.
+- The firmware's echoed speed is now a diagnostic value (`last_rotary_speed` on
+  `roamadome: motion`), so a sweep shows which speed each move ran with.
+
 ## Lessons
 
 - A bench node left running from an earlier script (the pid file held the `ros2 run`

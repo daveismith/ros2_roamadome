@@ -191,10 +191,11 @@ protected:
   void setCommandPositionForTest(double radians) {controller_->cmd_position_ = radians;}
   void setCommandVelocityForTest(double rad_s) {controller_->cmd_velocity_ = rad_s;}
   double commandPositionForTest() const {return controller_->cmd_position_;}
-  astromech_msgs::srv::DomeBenchMove::Response benchMoveForTest(int degrees)
+  astromech_msgs::srv::DomeBenchMove::Response benchMoveForTest(int degrees, int speed_percent = 0)
   {
     auto request = std::make_shared<astromech_msgs::srv::DomeBenchMove::Request>();
     request->target_deg = static_cast<uint16_t>(degrees);
+    request->speed_percent = static_cast<uint8_t>(speed_percent);
     auto response = std::make_shared<astromech_msgs::srv::DomeBenchMove::Response>();
     controller_->handleBenchMove(request, response);
     return *response;
@@ -1022,6 +1023,19 @@ TEST_F(RoamadomeControlTest, ConfigureStateMachine_UsesConfigurableSetupTimeout)
  * NEW PARAMETER PARSING TESTS
  * ============================================================================
  */
+
+TEST_F(RoamadomeControlTest, ParameterParsing_PositionMoveSpeedPercent)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["position_move_speed_percent"] = "101";
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
+
+  info.hardware_parameters["position_move_speed_percent"] = "40";
+  params.hardware_info = info;
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+}
 
 TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_True)
 {
@@ -2483,7 +2497,9 @@ class BenchModeTest : public RoamadomeControlTest
 {
 protected:
   // Brings the controller up on a pty with bench mode on (or off).
-  void bringUp(PseudoTerminal * pty, bool enable_bench)
+  void bringUp(
+    PseudoTerminal * pty, bool enable_bench,
+    const std::map<std::string, std::string> & extra_parameters = {})
   {
     hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
     info.hardware_parameters["serial_port"] = pty->slavePath();
@@ -2493,6 +2509,9 @@ protected:
     info.hardware_parameters["startup_retries"] = "1";
     info.hardware_parameters["enable_bench_mode"] = enable_bench ? "true" : "false";
     info.hardware_parameters["bench_heartbeat_timeout_ms"] = std::to_string(kBenchTimeoutMs);
+    for (const auto & [key, value] : extra_parameters) {
+      info.hardware_parameters[key] = value;
+    }
 
     hardware_interface::HardwareComponentInterfaceParams params;
     params.hardware_info = info;
@@ -3094,6 +3113,64 @@ TEST_F(BenchModeTest, PositionModeSwitch_HoldsCurrentAngleInsteadOfSendingDpa0)
   writeOnce();
   std::this_thread::sleep_for(std::chrono::milliseconds(40));
   EXPECT_EQ(firmware.count(":DPA57"), 1);
+}
+
+TEST_F(BenchModeTest, PositionMoveSpeedParameter_AppendsPercentToControllerMoves)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false, {{"position_move_speed_percent", "40"}});
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  setPositionStateForTest(100.0 * M_PI / 180.0);
+  ASSERT_EQ(switchToPositionForTest(), hardware_interface::return_type::OK);
+  setCommandPositionForTest(1.0);  // 57.3 deg
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA57,40", 1000));
+  EXPECT_EQ(firmware.count(":DPA57"), 0);
+}
+
+TEST_F(BenchModeTest, BenchMove_SpeedPercentIsSentAndPartOfTheKeepAliveIdentity)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, true);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  EXPECT_TRUE(benchMoveForTest(120, 45).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA120,45", 1000));
+
+  // Same target and speed: silent keep-alive.
+  const auto again = benchMoveForTest(120, 45);
+  EXPECT_TRUE(again.success);
+  EXPECT_NE(again.message.find("kept alive"), std::string::npos);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPA120,45"), 1);
+
+  // Same target, different speed: re-sent.
+  EXPECT_TRUE(benchMoveForTest(120, 60).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA120,60", 1000));
+
+  // Speed 0 means no suffix.
+  EXPECT_TRUE(benchMoveForTest(120, 0).success);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPA120", 1000));
+
+  // Out of range is rejected and sends nothing.
+  const auto bad = benchMoveForTest(120, 101);
+  EXPECT_FALSE(bad.success);
+  EXPECT_NE(bad.message.find("speed_percent"), std::string::npos);
+  writeOnce();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(firmware.count(":DPA120,101"), 0);
+  EXPECT_EQ(firmware.count(":DPA120"), 1);
 }
 
 // ---- Plausibility gate on the read path ----

@@ -63,7 +63,7 @@ class DriveGate:
     Serialise every bench drive call and remember what to keep alive.
 
     ``call(percent, timeout)`` performs one bench/drive call and returns
-    ``(ok, message)``; ``call_move(target_deg, timeout)`` performs one
+    ``(ok, message)``; ``call_move(target_deg, speed_percent, timeout)`` performs one
     bench/move call (optional). The gate remembers the percent, or the move
     target, that the heartbeat must repeat. Once :meth:`begin_stopping` has been
     called (abort, cleanup, signal) only percent 0 is sent until :meth:`arm`
@@ -78,12 +78,14 @@ class DriveGate:
         self._lock = threading.Lock()
         self._percent = 0
         self._move = None
+        self._move_speed = 0
         self._stopping = threading.Event()
 
     def arm(self):
         """Start of a sweep: nothing commanded, non-zero percents allowed."""
         self._percent = 0
         self._move = None
+        self._move_speed = 0
         self._stopping.clear()
 
     def begin_stopping(self):
@@ -97,6 +99,11 @@ class DriveGate:
     @property
     def percent(self):
         return self._percent
+
+    @property
+    def move_speed(self):
+        """Return the speed percent of the move being kept alive (0 = default)."""
+        return self._move_speed
 
     @property
     def move_target(self):
@@ -118,6 +125,7 @@ class DriveGate:
             self._percent = percent
             if percent == 0:
                 self._move = None   # releases the move claim
+                self._move_speed = 0
             ok, message = self._call(percent, timeout)
             if not ok:
                 self._percent = 0
@@ -125,9 +133,16 @@ class DriveGate:
         finally:
             self._lock.release()
 
-    def move(self, target_deg, lock_timeout=DRIVE_LOCK_TIMEOUT_S, timeout=SERVICE_TIMEOUT_S):
-        """Command a firmware position move to ``target_deg``; return ``(ok, message)``."""
+    def move(self, target_deg, speed_percent=0, lock_timeout=DRIVE_LOCK_TIMEOUT_S,
+             timeout=SERVICE_TIMEOUT_S):
+        """
+        Command a firmware position move; return ``(ok, message)``.
+
+        ``speed_percent`` 0 keeps the firmware SpeedTarget (or the plugin default); 1..100
+        is a per-move speed. The heartbeat repeats the same (target, speed) pair.
+        """
         target_deg = int(target_deg) % 360
+        speed_percent = int(speed_percent)
         if self._call_move is None:
             return False, 'bench move is not supported'
         if self._stopping.is_set():
@@ -139,8 +154,9 @@ class DriveGate:
                 return False, REFUSED_STOPPING
             if self._percent != 0:
                 return False, REFUSED_DRIVE_ACTIVE
-            ok, message = self._call_move(target_deg, timeout)
+            ok, message = self._call_move(target_deg, speed_percent, timeout)
             self._move = target_deg if ok else None
+            self._move_speed = speed_percent if ok else 0
             return ok, message
         finally:
             self._lock.release()
@@ -161,11 +177,13 @@ class DriveGate:
                     return None
                 self._percent = 0
                 self._move = None
+                self._move_speed = 0
                 return self._call(0, timeout)
             if self._move is not None:
-                ok, message = self._call_move(self._move, timeout)
+                ok, message = self._call_move(self._move, self._move_speed, timeout)
                 if not ok:
                     self._move = None
+                    self._move_speed = 0
                 return ok, message
             if self._percent == 0:
                 return None
@@ -183,6 +201,7 @@ class DriveGate:
         try:
             self._percent = 0
             self._move = None
+            self._move_speed = 0
             return self._call(0, timeout)
         finally:
             if locked:
@@ -244,6 +263,10 @@ def validate_config(get):
     errors += validate_percents('position_sweep.stop_percents',
                                 get('position_sweep.stop_percents'))
     errors += validate_moves('position_sweep.moves_deg', get('position_sweep.moves_deg'))
+    speed = get('position_sweep.move_speed_percent')
+    if isinstance(speed, bool) or not isinstance(speed, int) or not 0 <= speed <= 100:
+        errors.append('position_sweep.move_speed_percent must be an integer in 0..100, got %r'
+                      % (speed,))
     for name in ('sensor_sweep.settle_s', 'speed_sweep.settle_s',
                  'sensor_sweep.wrap_allowance_deg'):
         if get(name) < 0.0:
