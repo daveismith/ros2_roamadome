@@ -132,6 +132,7 @@ class BenchNode(Node):
                                [150, -150, 40, -40, 90, -90, 20, -20, 120, -120, 60, -60])
         self.declare_parameter('position_sweep.settle_s', 1.2)
         self.declare_parameter('position_sweep.move_timeout_s', 12.0)
+        self.declare_parameter('position_sweep.move_speed_percent', 0)
         self.declare_parameter('position_sweep.stopped_deg_s', 5.0)
 
         errors = control.validate_config(lambda name: self.get_parameter(name).value)
@@ -398,12 +399,13 @@ class BenchNode(Node):
             return False, 'no response from %s/bench/drive within %.1f s' % (self._hw, timeout)
         return bool(response.success), response.message
 
-    def _call_move(self, target_deg, timeout=SERVICE_TIMEOUT_S):
+    def _call_move(self, target_deg, speed_percent=0, timeout=SERVICE_TIMEOUT_S):
         """One bench/move call; only DriveGate calls this."""
         if not self._move_client.service_is_ready():
             return False, '%s/bench/move is not available' % self._hw
         request = DomeBenchMove.Request()
         request.target_deg = int(target_deg) % 360
+        request.speed_percent = int(speed_percent)
         response = self._wait_future(self._move_client,
                                      self._move_client.call_async(request), timeout)
         if response is None:
@@ -427,11 +429,11 @@ class BenchNode(Node):
                 continue
             raise SweepAbort('bench drive %d%% rejected: %s' % (percent, message))
 
-    def _move(self, target_deg, settings_retry_s=0.0):
+    def _move(self, target_deg, settings_retry_s=0.0, speed_percent=0):
         """Command a bench position move; a rejection aborts the sweep."""
         deadline = time.monotonic() + settings_retry_s
         while True:
-            ok, message = self._gate.move(target_deg)
+            ok, message = self._gate.move(target_deg, speed_percent)
             if ok:
                 return
             if ('settings write is in flight' in message and time.monotonic() < deadline and
@@ -596,6 +598,7 @@ class BenchNode(Node):
             params['moves_deg'] = [int(d) for d in get('position_sweep.moves_deg')]
             params['settle_s'] = float(get('position_sweep.settle_s'))
             params['move_timeout_s'] = float(get('position_sweep.move_timeout_s'))
+            params['move_speed_percent'] = int(get('position_sweep.move_speed_percent'))
             params['stopped_deg_s'] = float(get('position_sweep.stopped_deg_s'))
         return params
 
@@ -897,14 +900,15 @@ class BenchNode(Node):
         target = (start + delta) % 360
         meta = {'index': index, 'kind': 'move', 'percent': 0, 'direction': direction,
                 'start_deg': start, 'target_deg': target, 'delta_deg': delta,
-                'end_reason': 'incomplete'}
+                'speed_percent': p.get('move_speed_percent', 0), 'end_reason': 'incomplete'}
         before, _, _ = self._motion_status_values()
         self.get_logger().info('Step %d (move): %d -> %d deg (delta %+d)'
                                % (index, start, target, delta))
         self._check_abort()
         first_drive = not self._driven_once
         self._driven_once = True
-        self._move(target, SETTINGS_IN_FLIGHT_RETRY_S if first_drive else 0.0)
+        self._move(target, SETTINGS_IN_FLIGHT_RETRY_S if first_drive else 0.0,
+                   p.get('move_speed_percent', 0))
         meta['t_move_wall'] = time.time()
         self._begin_step(meta, analysis.PHASE_MOVE, direction)
         try:

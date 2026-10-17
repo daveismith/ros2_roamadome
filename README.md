@@ -160,14 +160,17 @@ the parameter `false` (the default) the service does not exist.
   (`COMMAND_MODE_BENCH`) and the sent percent in `commanded_percent`; it returns to 0 when
   the drive stops. Settings writes are refused while `commanded_percent` is non-zero.
 - **Bench move.** `~/bench/move` (`astromech_msgs/srv/DomeBenchMove`, request
-  `uint16 target_deg`, 0..359) sends one absolute, home-relative `:DPA<target>` for the
-  position sweep. The firmware runs the move to completion on its own (`REACHED TARGET`, or
+  `uint16 target_deg`, 0..359, and `uint8 speed_percent`, 0..100) sends one absolute,
+  home-relative `:DPA<target>` for the position sweep. A non-zero `speed_percent` is sent as
+  a per-move speed, `:DPA<target>,<percent>` (the firmware floors it at `MinSpeed` and
+  restores `SpeedTarget` when the move ends); 0 uses `position_move_speed_percent` if set,
+  else plain `:DPA<target>`; above 100 is rejected. The firmware runs the move to completion on its own (`REACHED TARGET`, or
   its own position timeout) and **the host cannot cancel it**: `:DPR0` does not clear the
   firmware's target mode, and a non-zero `:DPR` only overrides it while non-zero (at `:DPR0`
   the firmware resumes the move), so a non-zero drive is refused while a move is claimed and
   a move is refused while a drive is active. The same gating as the drive applies (active,
   port open, no controller, no settings write in flight), the claim is kept alive by
-  repeating the call (an identical target refreshes the heartbeat without re-sending; a new
+  repeating the call (an identical target and speed refreshes the heartbeat without re-sending; a new
   target is sent), and `bench/drive` with percent 0 releases it; do that once the dome is at
   rest. If the heartbeat expires while a move is claimed the claim is released with a WARN
   and the firmware finishes the move. `command_mode` is 3 while the claim is held,
@@ -244,6 +247,7 @@ strictly ascending without duplicates; settle times must be >= 0; durations and 
 | `position_sweep.moves_deg` | `[150, -150, 40, -40, 90, -90, 20, -20, 120, -120, 60, -60]` | Firmware moves, each relative to the angle at its start, non-zero integers in -359..359 |
 | `position_sweep.settle_s` | `1.2` | A step is at rest once the reported angle has not changed for this long |
 | `position_sweep.move_timeout_s` | `12.0` | A move not at rest by then is recorded as `timeout` (the firmware's own `device.timeout` is 5 s without dome movement) |
+| `position_sweep.move_speed_percent` | `0` | Per-move speed for the position sweep's firmware moves, 0..100, sent as `:DPA<deg>,<percent>`; 0 uses the firmware's `SpeedTarget` (or the plugin's `position_move_speed_percent`). Recorded as `speed_percent` in each move step and `move_speed_percent` in `position_sweep.json` |
 | `position_sweep.stopped_deg_s` | `5.0` | Speed below which the dome counts as stopped for the stop-time and settle-time clocks (analysis) |
 
 Services and topics on the bench node:
@@ -587,9 +591,9 @@ firmware menu or `#DP` commands, invalidates the fit: re-run (b) to (d).
 percent to it): the calibration reference above was measured at SpeedTarget 100, but the
 position-move tuning in (g) set it to 60, at which the velocity path tops out at about
 3.5 rad/s (200 deg/s, 2026-10-16 position sweep). Before phase 7 either re-run the
-operating-settings speed sweep at SpeedTarget 60 or run the robot at 100 and tune the
-position moves another way (the firmware accepts a per-move speed, `:DPA<deg>,<percent>`,
-which the plugin does not send yet).
+operating-settings speed sweep at SpeedTarget 60 or run the robot at 100 and set the
+position cruise speed per move: the firmware accepts `:DPA<deg>,<percent>`, which the
+plugin sends from the `position_move_speed_percent` hardware parameter (see (g)).
 
 **(g) Position-move tuning: `DecelerationScale`, `SpeedTarget` and `Fudge`.** The
 firmware's position move tapers the commanded percent from `SpeedTarget` down to the
@@ -633,6 +637,13 @@ loaded; the sweep service replaced them that evening,
    distance at the floor arrival speed. The floor speed varies with dome angle (position-
    dependent friction: 40 to 100 deg/s at 32 % here), so set the fudge at the middle of
    that range and check both directions at several end angles.
+
+   To keep the velocity controller at full range, leave `device.speed_target` at 100 and
+   choose the position cruise speed per move instead: repeat the position sweep with
+   `position_sweep.move_speed_percent` candidates (for example 40, 60) and compare arrival
+   speed, overshoot and rest error, then set the chosen value as the
+   `position_move_speed_percent` hardware parameter in the URDF so every position-controller
+   move is sent as `:DPA<deg>,<percent>`. `DecelerationScale` and `Fudge` apply as before.
 
 Measured on the assembled dome, new plate, MinSpeed 32:
 
@@ -749,7 +760,9 @@ Commands can be published to controller topics or issued via the controller mana
 - **Position mode.** When a position controller claims the joint, the interface sets the
   command interface to the dome's current angle and sends nothing until the controller
   writes a different value (more than 0.01 rad away), so activating a controller no longer
-  sends the dome to 0 deg. A `NaN` command (a controller that writes `NaN`) sends nothing.
+  sends the dome to 0 deg. With `position_move_speed_percent` set (1..100) each move is sent
+  as `:DPA<deg>,<percent>`, a per-move speed that leaves `SpeedTarget` (and so the velocity
+  controller) untouched; 0 sends plain `:DPA<deg>`. A `NaN` command (a controller that writes `NaN`) sends nothing.
   In velocity mode the command starts at 0 and the first non-zero value is sent.
 - **A firmware position move cannot be cancelled from the host.** `:DPA` hands the move to
   the firmware's target mode, and `:DPR0` (what the interface sends on a mode switch, a bench
@@ -788,6 +801,7 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 | `publish_telemetry` | bool | `false` | Publish `astromech_msgs/DomeTelemetry` on `~/telemetry` for every position report |
 | `velocity_window_s` | double | `0.5` | Trailing regression window for the velocity estimate (s), must be > 0 |
 | `enable_bench_mode` | bool | `false` | Create the raw drive service `~/bench/drive` (see [Bench mode](#bench-mode)); normally set by the `dome_bench` launch argument |
+| `position_move_speed_percent` | uint32 | `0` | Per-move speed for position-controller moves, 0..100: non-zero sends `:DPA<deg>,<percent>`, 0 sends `:DPA<deg>` (the firmware's `SpeedTarget`) |
 | `bench_heartbeat_timeout_ms` | uint32 | `1500` | Send `:DPR0` if no bench drive call arrives within this time while a bench drive is active, must be > 0 |
 | `status_poll_interval_ms` | uint32 | `10000` | Interval for the `#DPSTATUS` poll that feeds `/diagnostics`; `0` disables |
 | `max_plausible_deg_s` | double | `0.0` | Plausibility gate for position reports (see [Velocity estimate and telemetry](#velocity-estimate-and-telemetry)): hold a report that implies a faster step than this until the next report confirms it; `0` disables. `r2_bringup` sets 600 |
@@ -1118,7 +1132,7 @@ ros2 param get /roamadome device.auto_mode
 
 Common commands:
 
-- `:DPA<degrees>` - Rotate dome to absolute position (0-359°)
+- `:DPA<degrees>[,<percent>]` - Rotate dome to absolute position (0-359°), optionally at a per-move speed
 - `:DPH` - Return dome to home position
 - `:DPR<speed>` - Rotate dome continuously
 - `:DPS<number>` - Play stored sequence

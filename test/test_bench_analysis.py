@@ -636,12 +636,13 @@ def position_run():
         rows += _rows(index, t, 0, direction, analysis.PHASE_MOVE, profile)
         steps.append({'index': index, 'kind': 'move', 'percent': 0, 'direction': direction,
                       'start_deg': start, 'target_deg': target, 'delta_deg': delta,
-                      'end_reason': 'completed', 'settled': True, 't_move_wall': t - 0.02,
+                      'speed_percent': 45, 'end_reason': 'completed', 'settled': True,
+                      't_move_wall': t - 0.02,
                       'firmware': {'status_seen': True, 'position_timeouts': 0,
                                    'reached_target_deg': target}})
         t = rows[-1].t_host + 2.0
     config = dict(CONFIG, raw_motor=False, stopped_deg_s=5.0, wrap_allowance_deg=10.0,
-                  fudge_deg=5)
+                  fudge_deg=5, move_speed_percent=45)
     run_info = {'sweep': 'position', 'run_id': 'synthetic', 'status': 'complete',
                 'config': config, 'steps': steps,
                 'settings_context': {'speed_target': 60, 'deceleration_scale': 250, 'fudge': 5}}
@@ -671,6 +672,8 @@ def test_position_sweep_stop_curve_and_moves():
     moves = result['moves']
     assert moves['count'] == 2 and moves['completed'] == 2 and moves['timed_out'] == 0
     plus, minus = moves['steps']
+    assert result['move_speed_percent'] == 45
+    assert plus['speed_percent'] == 45 and moves['steps'][1]['speed_percent'] == 45
     assert plus['target_deg'] == 100 and plus['rest_error_deg'] == 3
     assert not plus['target_in_dead_zone']
     assert plus['furthest_past_target_deg'] == 3 and plus['reached_target']
