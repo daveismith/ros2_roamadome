@@ -590,10 +590,16 @@ firmware menu or `#DP` commands, invalidates the fit: re-run (b) to (d).
 **`SpeedTarget` caps `:DPR` as well as position moves** (the firmware clamps the rotate
 percent to it): the calibration reference above was measured at SpeedTarget 100, but the
 position-move tuning in (g) set it to 60, at which the velocity path tops out at about
-3.5 rad/s (200 deg/s, 2026-10-16 position sweep). Before phase 7 either re-run the
-operating-settings speed sweep at SpeedTarget 60 or run the robot at 100 and set the
-position cruise speed per move: the firmware accepts `:DPA<deg>,<percent>`, which the
-plugin sends from the `position_move_speed_percent` hardware parameter (see (g)).
+3.5 rad/s (200 deg/s, 2026-10-16 position sweep). **Set `device.speed_target` back to 100
+for the velocity controller: it does not change the position moves.** A direct probe
+(2026-10-16, [the position sweep report](docs/bench_results/2026-10-16-position-sweep-service.md))
+sent 150 deg moves at a per-move speed of 0.40, 0.60 and 1.00 (`:DPA<deg>,<percent>`,
+which sets the firmware's target speed for that move exactly as `SpeedTarget` would) and
+got the same peak (76 to 112 deg/s) and rest error every time: the Reeltwo drive commands
+`speed x distance / DecelerationScale x MaxSpeed`, floored at `MinSpeed`, so with
+`DecelerationScale` 250 and moves of at most 180 deg the taper and the 32 % floor decide
+the speed, not the target. The plugin can still send a per-move speed
+(`position_move_speed_percent`, see (g)); it only matters with a short `DecelerationScale`.
 
 **(g) Position-move tuning: `DecelerationScale`, `SpeedTarget` and `Fudge`.** The
 firmware's position move tapers the commanded percent from `SpeedTarget` down to the
@@ -638,12 +644,18 @@ loaded; the sweep service replaced them that evening,
    dependent friction: 40 to 100 deg/s at 32 % here), so set the fudge at the middle of
    that range and check both directions at several end angles.
 
-   To keep the velocity controller at full range, leave `device.speed_target` at 100 and
-   choose the position cruise speed per move instead: repeat the position sweep with
-   `position_sweep.move_speed_percent` candidates (for example 40, 60) and compare arrival
-   speed, overshoot and rest error, then set the chosen value as the
-   `position_move_speed_percent` hardware parameter in the URDF so every position-controller
-   move is sent as `:DPA<deg>,<percent>`. `DecelerationScale` and `Fudge` apply as before.
+   To keep the velocity controller at full range, leave `device.speed_target` at 100. The
+   plugin can send a per-move speed instead (`:DPA<deg>,<percent>`: the
+   `position_move_speed_percent` hardware parameter for controller moves,
+   `position_sweep.move_speed_percent` for the sweep's moves, recorded as `speed_percent`
+   per step), but on this dome it changes nothing: the command is
+   `speed x distance / DecelerationScale x MaxSpeed` floored at `MinSpeed`, so with
+   `DecelerationScale` 250 every move up to 180 deg starts at or near the floor whatever
+   the speed (measured: peak 76 to 112 deg/s and the same rest errors at 0.40, 0.60 and
+   1.00). The per-move speed becomes a useful knob only with a short taper (say 100 deg),
+   where the earlier runs overshot; if you go that way, sweep `move_speed_percent`
+   candidates and compare arrival speed, overshoot and rest error before setting the URDF
+   parameter.
 
 Measured on the assembled dome, new plate, MinSpeed 32:
 
