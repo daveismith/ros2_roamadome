@@ -168,11 +168,13 @@ def test_gate_force_stop_takes_the_lock_when_free_and_sends_zero_anyway_when_hel
 class FakeMove:
     def __init__(self, ok=True, message='move ok'):
         self.calls = []
+        self.speeds = []
         self.ok = ok
         self.message = message
 
-    def __call__(self, target_deg, timeout):
+    def __call__(self, target_deg, speed_percent, timeout):
         self.calls.append(target_deg)
+        self.speeds.append(speed_percent)
         return self.ok, self.message
 
 
@@ -218,6 +220,29 @@ def test_gate_failed_move_is_not_kept_alive():
     assert gate.move(10) == (False, 'a controller is commanding the dome')
     assert gate.move_target is None
     assert gate.heartbeat() is None
+
+
+def test_gate_move_passes_the_speed_and_the_heartbeat_repeats_the_pair():
+    drive, move = FakeDrive(), FakeMove()
+    gate = control.DriveGate(drive, move)
+    gate.arm()
+    assert gate.move(120, 45)[0]
+    assert gate.move_target == 120 and gate.move_speed == 45
+    assert gate.heartbeat()[0]
+    assert move.calls == [120, 120] and move.speeds == [45, 45]
+    assert gate.move(120, 60)[0]
+    assert gate.heartbeat()[0]
+    assert move.speeds == [45, 45, 60, 60]
+    assert gate.move(90)[0] and gate.move_speed == 0   # default speed
+    assert gate.send(0)[0]
+    assert gate.move_target is None and gate.move_speed == 0
+
+
+def test_move_speed_percent_is_validated():
+    assert errors_with(position_sweep__move_speed_percent=100) == []
+    for bad in (-1, 101, 40.5, True):
+        errors = errors_with(position_sweep__move_speed_percent=bad)
+        assert len(errors) == 1 and 'move_speed_percent' in errors[0]
 
 
 def test_move_outcome_from_motion_status():
@@ -268,6 +293,7 @@ DEFAULTS = {
     'position_sweep.moves_deg': [150, -150, 40, -40],
     'position_sweep.settle_s': 1.2,
     'position_sweep.move_timeout_s': 12.0,
+    'position_sweep.move_speed_percent': 0,
     'position_sweep.stopped_deg_s': 5.0,
 }
 

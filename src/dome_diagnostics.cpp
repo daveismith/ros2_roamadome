@@ -354,6 +354,7 @@ std::vector<DiagnosticStatus> buildDomeDiagnostics(
     addValue(&motion, "last_accepted_rotate_percent",
       formatOptional(state.last_accepted_rotate_percent));
     addValue(&motion, "last_rotary_target_deg", formatOptional(state.last_rotary_target_deg));
+    addValue(&motion, "last_rotary_speed", formatOptional(state.last_rotary_speed));
     addValue(&motion, "last_target_reached_deg", formatOptional(state.last_target_reached_deg));
     addValue(&motion, "last_home_reached_deg", formatOptional(state.last_home_reached_deg));
     addValue(&motion, "last_move_completed_age_s", formatAge(state.last_move_completed, now));

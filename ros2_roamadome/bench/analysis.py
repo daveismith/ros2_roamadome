@@ -846,6 +846,7 @@ def summarize_move_step(rows, meta, config):
     summary['start_deg'] = meta.get('start_deg')
     summary['target_deg'] = target
     summary['delta_deg'] = delta
+    summary['speed_percent'] = meta.get('speed_percent', 0)
     # The controller never reports 356..3 deg, so a rest error against a target
     # there is inflated by the dead zone.
     summary['target_in_dead_zone'] = target >= 356 or target <= 3
@@ -910,6 +911,7 @@ def analyze_position_sweep(run_info, rows):
 
     result = _header(run_info)
     result['settings'] = settings
+    result['move_speed_percent'] = int(config.get('move_speed_percent', 0) or 0)
 
     curve = collections.OrderedDict()
     # Only steps that ran their full time and coasted to rest carry a valid distance.

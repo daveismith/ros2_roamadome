@@ -386,6 +386,18 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  if (!parseOptionalUInt32Parameter(
+      parameters,
+      logger_,
+      "position_move_speed_percent",
+      0,
+      [](uint32_t value) {return value <= 100;},
+      "0..100",
+      &positionMoveSpeedPercent_))
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   RCLCPP_INFO(logger_, "Bench mode %s; bench heartbeat timeout: %u ms",
               enableBenchMode_ ? "ENABLED (raw ~/bench/drive service)" : "disabled",
               benchHeartbeatTimeoutMs_);
@@ -1698,15 +1710,26 @@ int32_t RoamadomeControl::velocityToPercentage(double rad_per_sec) const
   return static_cast<int32_t>(std::round(percentage));
 }
 
-bool RoamadomeControl::sendPositionCommand(uint32_t degrees)
+std::string RoamadomeControl::positionCommandString(uint32_t degrees, uint32_t speed_percent) const
+{
+  const uint32_t speed = speed_percent != 0 ? speed_percent : positionMoveSpeedPercent_;
+  std::string command = buildCommand(":DPA", degrees);
+  if (speed != 0) {
+    command += "," + std::to_string(speed);
+  }
+  return command;
+}
+
+bool RoamadomeControl::sendPositionCommand(uint32_t degrees, uint32_t speed_percent)
 {
   if (!serialHandler_ || !serialHandler_->isOpen()) {
     RCLCPP_WARN(logger_, "Serial handler not available for position command");
     return false;
   }
 
-  // Format: :DPA<degrees> where degrees is 0-359
-  std::string command = buildCommand(":DPA", degrees);
+  // Format: :DPA<degrees>[,<percent>] where degrees is 0-359; the optional percent is a
+  // per-move speed the firmware applies to this move only.
+  const std::string command = positionCommandString(degrees, speed_percent);
   if (!serialHandler_->sendCommand(command)) {
     return false;
   }
@@ -1817,6 +1840,7 @@ void RoamadomeControl::handleBenchDrive(
     if (percent == 0 && benchMoveTarget_.has_value()) {
       released_move = benchMoveTarget_;
       benchMoveTarget_.reset();
+      benchMoveSpeed_ = 0;
       benchMoveSent_ = false;
     }
     updateTelemetryModeLocked();
@@ -1840,7 +1864,12 @@ void RoamadomeControl::handleBenchMove(
     response->message = "target_deg must be 0..359; bench move rejected";
     return;
   }
+  if (request->speed_percent > 100) {
+    response->message = "speed_percent must be 0..100; bench move rejected";
+    return;
+  }
   const uint16_t target = request->target_deg;
+  const uint8_t speed = request->speed_percent;
   std::string reason;
   if (!benchRequestAllowed(&reason, true)) {
     response->message = reason + "; bench move rejected";
@@ -1864,9 +1893,11 @@ void RoamadomeControl::handleBenchMove(
         std::to_string(lastCommandedPercent_.load()) + "%; stop it first; bench move rejected";
       return;
     }
-    kept_alive = benchMoveTarget_.has_value() && *benchMoveTarget_ == target && benchMoveSent_;
+    kept_alive = benchMoveTarget_.has_value() && *benchMoveTarget_ == target &&
+      benchMoveSpeed_ == speed && benchMoveSent_;
     if (!kept_alive) {
       benchMoveTarget_ = target;
+      benchMoveSpeed_ = speed;
       benchMoveSent_ = false;
     }
     benchActive_ = true;
@@ -1892,6 +1923,7 @@ void RoamadomeControl::resetBenchState()
   benchPendingPercent_ = 0;
   benchLastSentPercent_ = 0;
   benchMoveTarget_.reset();
+  benchMoveSpeed_ = 0;
   benchMoveSent_ = false;
   updateTelemetryModeLocked();
 }
@@ -1935,6 +1967,7 @@ void RoamadomeControl::serviceBenchDrive()
   Action action = Action::NONE;
   int32_t percent = 0;
   uint16_t target = 0;
+  uint8_t move_speed = 0;
   {
     std::lock_guard<std::mutex> lock(bench_mutex_);
     if (!benchActive_) {
@@ -1948,6 +1981,7 @@ void RoamadomeControl::serviceBenchDrive()
     } else if (benchMoveTarget_.has_value() && !benchMoveSent_) {
       action = Action::MOVE;
       target = *benchMoveTarget_;
+      move_speed = benchMoveSpeed_;
     } else if (benchPendingPercent_ != benchLastSentPercent_ ||
       (benchPendingPercent_ == 0 && lastCommandedPercent_.load() != 0))
     {
@@ -1965,13 +1999,16 @@ void RoamadomeControl::serviceBenchDrive()
   } else if (action == Action::EXPIRE) {
     stopBenchDrive("heartbeat expired");
   } else if (action == Action::MOVE) {
-    if (!sendPositionCommand(target)) {
+    const std::string command = positionCommandString(target, move_speed);
+    if (!sendPositionCommand(target, move_speed)) {
       RCLCPP_ERROR_THROTTLE(logger_, throttleClock_, 1000,
-        "Bench move: failed to send :DPA%u; will retry", target);
+        "Bench move: failed to send %s; will retry", command.c_str());
     } else {
-      RCLCPP_INFO(logger_, "Bench move: sent :DPA%u", target);
+      RCLCPP_INFO(logger_, "Bench move: sent %s", command.c_str());
       std::lock_guard<std::mutex> lock(bench_mutex_);
-      if (benchMoveTarget_.has_value() && *benchMoveTarget_ == target) {
+      if (benchMoveTarget_.has_value() && *benchMoveTarget_ == target &&
+        benchMoveSpeed_ == move_speed)
+      {
         benchMoveSent_ = true;  // a newer target would be sent on the next cycle
       }
     }
