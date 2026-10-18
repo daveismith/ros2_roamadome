@@ -710,15 +710,13 @@ velocity within 10 % of the commanded one after settling. With the values above 
 `:DPR-36` for +1.5 rad/s, `:DPR36` for -1.5, `:DPR-54` for +3.0 and `:DPR53` for -3.0.
 Result on the dome (2026-10-17,
 [docs/bench_results/2026-10-17-phase7-acceptance.md](docs/bench_results/2026-10-17-phase7-acceptance.md)):
-**3.0 rad/s passes** in both directions in every run (within 4 %); **1.5 rad/s does not**:
-before the realignment 36 % ran the dome at 1.04 to 1.56 rad/s over eight windows (four
-within 10 %), and after it, with the lower p0, 1.5 rad/s maps to the 32 % floor itself, which
-runs 1.16 to 1.30 rad/s (14 to 23 % slow, see
-[the realignment report](docs/bench_results/2026-10-17-realigned-dome.md)). Near the floor the
-speed is set by the dome's friction, not the command; from about 2 rad/s (39 %) up the fit
-holds within 5 %. To bring 1.5 rad/s inside the band, lower the floor: try `MinSpeed` 28 and
-25 now that the friction is reduced (they stalled on the 16th), then re-run the operating
-settings speed sweep and the position sweep.
+**3.0 rad/s passes** in both directions in every run (within 6 %); **1.5 rad/s is at the
+edge of the band**: with MinSpeed 20 it maps to 33 % and ran 1.31 to 1.65 rad/s over four
+windows, three within 10 % (at MinSpeed 32 it sat on the floor itself and ran 14 to 23 % slow;
+see [the realignment report](docs/bench_results/2026-10-17-realigned-dome.md)). Within a few
+points of the floor the speed is set by the dome's sector-to-sector friction, not the
+command: 1.0 rad/s (27 %) is commandable now but runs 0.68 to 0.81. From about 2 rad/s (39 %)
+up the fit holds within 5 %.
 
 ### Diagnostics
 

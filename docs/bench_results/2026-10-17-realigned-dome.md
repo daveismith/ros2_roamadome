@@ -121,3 +121,26 @@ The rule agreed with the user: go down until it breaks, then set the multiple of
   then resumed and the bench's stop went through. Unexplained; the dropout class seen before
   was host stalls of about 1 s. Worth watching: the velocity path has no watchdog, and a
   stalled process cannot stop the dome.
+
+## Phase 7 acceptance at MinSpeed 20 with the MinSpeed-20 map
+
+Same procedure as above, after `device.min_speed` 20 was set and acked (readback 20):
+
+| command (rad/s) | percent sent | telemetry (rad/s) | error |
+|---|---|---|---|
+| +1.5 | -33 | +1.654 | +10 % |
+| -1.5 | +33 | -1.495 | 0 % |
+| +3.0 | -52 | +3.141 | +5 % |
+| -3.0 | +52 | -3.183 | +6 % |
+| +1.0 | -27 | +0.811 | -19 % |
+| -1.0 | +27 | -0.677 | -32 % |
+| +1.5 | -33 | +1.374 | -8 % |
+| -1.5 | +33 | -1.313 | -12 % |
+
+**3.0 rad/s passes** (within 6 %, a little fast this time after an hour of running). **1.5 rad/s
+is now at the edge of the band**: three of four windows within 10 %, the spread 1.31 to
+1.65 rad/s for the same 33 %. **1.0 rad/s is commandable** (27 %, above the new floor) but runs
+0.68 to 0.81 rad/s: the fit's p0 overstates the speed within a few points of the floor, where
+the dome's sector-to-sector friction dominates. Compared with MinSpeed 32 the floor has moved
+from 1.3 to about 0.5 rad/s and the position moves are twice as accurate; the mapping is
+reliable from about 2 rad/s (39 %) upward and indicative below that.
