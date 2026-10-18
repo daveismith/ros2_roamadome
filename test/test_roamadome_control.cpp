@@ -1218,6 +1218,57 @@ TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_BelowMinimumInvalidFai
   EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
 }
 
+TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_BadValuesFail)
+{
+  const std::vector<std::map<std::string, std::string>> bad_cases = {
+    {{"velocity_map.positive.percent_sign", "1"}, {"velocity_map.negative.percent_sign", "1"}},
+    {{"velocity_map.positive.percent_sign", "-1"}, {"velocity_map.negative.percent_sign", "-1"}},
+    {{"velocity_map.positive.percent_sign", "-1"}},  // negative defaults to -1: equal
+    {{"velocity_map.positve.p0_percent", "1"}},
+    {{"velocity_map.positive.unknown", "1"}},
+    {{"velocity_map.below_minimun", "zero"}},
+    {{"velocity_map.negative.k_percent_per_rad_s", "-1"}},
+    {{"velocity_map.negative.k_percent_per_rad_s", "inf"}},
+    {{"velocity_map.positive.p0_percent", "nan"}},
+    {{"velocity_map.positive.p0_percent", "inf"}},
+    {{"velocity_map.negative.p0_percent", "-inf"}},
+    {{"velocity_map.positive.min_percent", "-1"}},
+    {{"velocity_map.positive.min_percent", "31.5"}},
+    {{"velocity_map.positive.min_percent", "abc"}},
+    {{"velocity_map.positive.k_percent_per_rad_s", "fast"}},
+    {{"velocity_map.positive.percent_sign", "plus"}},
+    {{"velocity_map.positive.percent_sign", "0"}},
+    {{"max_speed_rad_per_sec", "inf"}},
+    {{"max_speed_rad_per_sec", "nan"}},
+  };
+  for (const auto & extra : bad_cases) {
+    controller_ = std::make_unique<RoamadomeControl>();
+    hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+    std::string description;
+    for (const auto & [key, value] : extra) {
+      info.hardware_parameters[key] = value;
+      description += key + "=" + value + " ";
+    }
+    hardware_interface::HardwareComponentInterfaceParams params;
+    params.hardware_info = info;
+    EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR)
+      << description;
+  }
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_PartialDirectionAccepted)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["velocity_map.positive.min_percent"] = "20";
+  info.hardware_parameters["velocity_map.positive.percent_sign"] = "-1";
+  info.hardware_parameters["velocity_map.negative.percent_sign"] = "1";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+}
+
 TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_InvalidFails)
 {
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
@@ -3391,6 +3442,120 @@ TEST_F(BenchModeTest, VelocityMap_ConfiguredMapIsUsedOnTheWire)
   setCommandVelocityForTest(-1.5);
   writeOnce();
   ASSERT_TRUE(firmware.waitFor(":DPR36", 1000));
+}
+
+namespace
+{
+
+const std::map<std::string, std::string> kCalibratedMap = {
+  {"max_speed_rad_per_sec", "6.58"},
+  {"velocity_map.positive.k_percent_per_rad_s", "11.94"},
+  {"velocity_map.positive.p0_percent", "18.3"},
+  {"velocity_map.positive.min_percent", "32"},
+  {"velocity_map.positive.percent_sign", "-1"},
+  {"velocity_map.negative.k_percent_per_rad_s", "11.75"},
+  {"velocity_map.negative.p0_percent", "18.2"},
+  {"velocity_map.negative.min_percent", "32"},
+  {"velocity_map.negative.percent_sign", "1"},
+};
+
+}  // namespace
+
+TEST_F(BenchModeTest, VelocityMap_DefaultsOnTheWire)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false, {{"max_speed_rad_per_sec", "6.58"}});
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  setCommandVelocityForTest(1.5);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR23", 1000));
+  setCommandVelocityForTest(-1.5);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR-23", 1000));
+}
+
+TEST_F(BenchModeTest, VelocityMap_CalibrationPointsOnTheWire)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false, kCalibratedMap);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  const std::vector<std::pair<double, std::string>> points = {
+    {3.0, ":DPR-54"}, {-3.0, ":DPR53"}, {1.5, ":DPR-36"}, {-1.5, ":DPR36"}};
+  for (const auto & [velocity, wire] : points) {
+    setCommandVelocityForTest(velocity);
+    writeOnce();
+    ASSERT_TRUE(firmware.waitFor(wire, 1000)) << wire;
+  }
+}
+
+TEST_F(BenchModeTest, VelocityMap_ZeroAfterNonZeroSendsStop)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false, kCalibratedMap);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  setCommandVelocityForTest(1.5);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR-36", 1000));
+  setCommandVelocityForTest(0.0);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+}
+
+TEST_F(BenchModeTest, VelocityMap_MinimumModeTinyCommandThenZeroEndsWithStop)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  auto parameters = kCalibratedMap;
+  parameters["velocity_map.below_minimum"] = "minimum";
+  bringUp(&pty, false, parameters);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  setCommandVelocityForTest(0.5);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR-32", 1000));
+  setCommandVelocityForTest(0.005);
+  writeOnce();
+  setCommandVelocityForTest(0.0);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+  EXPECT_EQ(firmware.count(":DPR-32"), 1);   // 0.005 maps to the same percent: not re-sent
+}
+
+TEST_F(BenchModeTest, VelocityMap_ZeroModeDeadBandSendsNothing)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(&pty, false, kCalibratedMap);
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  for (const double velocity : {0.1, 0.3, 0.5, 1.0, -0.4}) {
+    setCommandVelocityForTest(velocity);
+    writeOnce();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  EXPECT_EQ(firmware.count(":DPR0"), 0);
+  EXPECT_EQ(firmware.count(":DPR-32"), 0);
 }
 
 }  // namespace ros2_roamadome

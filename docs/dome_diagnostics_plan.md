@@ -525,10 +525,10 @@ Repository: `ros2_roamadome`.
 
 Steps:
 
-1. Add hardware parameters `velocity_map.k_percent_per_rad_s`,
-   `velocity_map.p0_percent`, `velocity_map.min_percent`, each optionally per
-   direction, defaulting to values that reproduce today's linear behaviour so
-   the change is opt-in.
+1. Add hardware parameters `velocity_map.{positive,negative}.k_percent_per_rad_s`,
+   `.p0_percent`, `.min_percent` and `.percent_sign`, plus
+   `velocity_map.below_minimum` (`zero` or `minimum`), defaulting to values that
+   reproduce today's linear behaviour so the change is opt-in.
 2. `velocityToPercentage` becomes: zero if `|v|` maps below `min_percent`;
    otherwise `sign(v) * clamp(p0 + |v| * k, min_percent, 100)`.
 3. Set `max_speed_rad_per_sec` from the measured maximum and document that
@@ -536,8 +536,9 @@ Steps:
    and `SpeedTarget` noted as part of the calibration state.
 4. Add the measured numbers to `ros2_control.xacro` in `r2_bringup`.
 
-Acceptance: a commanded 0.5 rad/s produces a telemetry velocity within 10% of
-0.5 rad/s in both directions after settling.
+Acceptance: a commanded 1.5 and 3.0 rad/s in both directions produces a
+telemetry velocity within 10%, chosen 2026-10-17 because the 32% floor makes
+0.5 rad/s unreachable.
 
 ## 7. Algorithms
 

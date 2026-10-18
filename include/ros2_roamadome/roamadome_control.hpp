@@ -258,7 +258,9 @@ private:
   std::atomic<CommandMode> currentMode_{CommandMode::IDLE};
   // Last position / velocity command sent, NaN when none since the mode was entered.
   double lastSentPosition_ = std::numeric_limits<double>::quiet_NaN();
-  double lastSentVelocity_ = std::numeric_limits<double>::quiet_NaN();
+  // Last velocity percent sent (INT32_MIN: none since the mode was entered). Atomic because
+  // sendStopCommand() also runs from the bench drive path.
+  std::atomic<int32_t> lastSentPercent_{std::numeric_limits<int32_t>::min()};
   // A :DPA (bench move or position controller) has been sent and the firmware has
   // not yet reported REACHED TARGET / REACHED HOME / a position timeout. The host
   // cannot cancel such a move (:DPR0 does not clear the firmware's target mode and

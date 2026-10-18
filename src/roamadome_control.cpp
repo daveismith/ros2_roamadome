@@ -117,7 +117,6 @@ RoamadomeControl::RoamadomeControl()
   cmd_position_(0.0), cmd_velocity_(0.0),
   currentMode_(CommandMode::IDLE),
   lastSentPosition_(std::numeric_limits<double>::quiet_NaN()),
-  lastSentVelocity_(std::numeric_limits<double>::quiet_NaN()),
   configRefreshIntervalMs_(60000)
 {
   std::cout << "RoamadomeControl initialized." << std::endl;
@@ -185,8 +184,8 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
       logger_,
       "max_speed_rad_per_sec",
       3.14,
-      [](double value) {return value > 0.0;},
-      "> 0",
+      [](double value) {return std::isfinite(value) && value > 0.0;},
+      "finite and > 0",
       &maxSpeedRadPerSec_))
   {
     return hardware_interface::CallbackReturn::ERROR;
@@ -1564,10 +1563,10 @@ hardware_interface::return_type RoamadomeControl::write(
     // Velocity command: convert rad/s to percentage [-100, 100]
     int32_t target_percentage = velocityToPercentage(cmd_velocity_);
 
-    // Only send if velocity changed significantly (avoid redundant commands)
-    if (std::isnan(lastSentVelocity_) || std::fabs(cmd_velocity_ - lastSentVelocity_) > 0.01) {
+    // Only send when the percent actually changes (avoid redundant commands)
+    if (target_percentage != lastSentPercent_.load()) {
       if (sendVelocityCommand(target_percentage)) {
-        lastSentVelocity_ = cmd_velocity_;
+        lastSentPercent_.store(target_percentage);
         RCLCPP_DEBUG(logger_, "Sent velocity command: %d%%", target_percentage);
       }
     }
@@ -1646,7 +1645,7 @@ hardware_interface::return_type RoamadomeControl::perform_command_mode_switch(
     // :DPR0 has been sent (or nothing was commanded): the first non-zero velocity
     // command is sent, a command of 0 is not re-sent.
     cmd_velocity_ = 0.0;
-    lastSentVelocity_ = 0.0;
+    lastSentPercent_.store(0);
   }
   if (new_mode != CommandMode::IDLE && firmwareMoveOutstanding_.load()) {
     RCLCPP_WARN(logger_,
@@ -1707,6 +1706,40 @@ int32_t RoamadomeControl::velocityToPercentage(double rad_per_sec) const
 bool RoamadomeControl::parseVelocityMapParameters(
   const std::unordered_map<std::string, std::string> & parameters)
 {
+  static const std::vector<std::string> kKnown = {
+    "k_percent_per_rad_s", "p0_percent", "min_percent", "percent_sign"};
+  bool unknown_key = false;
+  for (const auto & entry : parameters) {
+    if (entry.first.rfind("velocity_map.", 0) != 0) {
+      continue;
+    }
+    bool known = entry.first == "velocity_map.below_minimum";
+    for (const char * dir : {"positive", "negative"}) {
+      for (const auto & key : kKnown) {
+        known = known || entry.first == std::string("velocity_map.") + dir + "." + key;
+      }
+    }
+    if (!known) {
+      RCLCPP_ERROR(logger_, "Unknown velocity map parameter '%s'", entry.first.c_str());
+      unknown_key = true;
+    }
+  }
+  if (unknown_key) {
+    return false;
+  }
+  for (const char * dir : {"positive", "negative"}) {
+    size_t given = 0;
+    for (const auto & key : kKnown) {
+      given += parameters.count(std::string("velocity_map.") + dir + "." + key);
+    }
+    if (given != 0 && given != kKnown.size()) {
+      RCLCPP_WARN(
+        logger_,
+        "velocity_map.%s is only partly specified (%zu of 4 keys); the others use defaults",
+        dir, given);
+    }
+  }
+
   // k defaults to 100 / max_speed_rad_per_sec, so max_speed_rad_per_sec must be parsed first.
   const double default_k = 100.0 / maxSpeedRadPerSec_;
   VelocityMap map = linearVelocityMap(maxSpeedRadPerSec_);
@@ -1728,8 +1761,10 @@ bool RoamadomeControl::parseVelocityMapParameters(
       }
       if (!parseOptionalDoubleParameter(
           parameters, logger_, prefix + ".min_percent", 0.0,
-          [](double value) {return value >= 0.0 && value <= 100.0;},
-          "0..100", &dir->min_percent))
+          [](double value) {
+            return value >= 0.0 && value <= 100.0 && value == std::floor(value);
+          },
+          "an integer in 0..100", &dir->min_percent))
       {
         return false;
       }
@@ -1756,6 +1791,14 @@ bool RoamadomeControl::parseVelocityMapParameters(
       parameters, logger_, "velocity_map.below_minimum", "zero", {"zero", "minimum"},
       &below_minimum))
   {
+    return false;
+  }
+  if (map.positive.percent_sign == map.negative.percent_sign) {
+    RCLCPP_ERROR(
+      logger_,
+      "velocity_map.positive.percent_sign and velocity_map.negative.percent_sign must differ "
+      "(both are %+d): the motor sign is one physical fact",
+      map.positive.percent_sign);
     return false;
   }
   map.below_minimum = below_minimum == "minimum" ? BelowMinimum::MINIMUM : BelowMinimum::ZERO;
@@ -2105,6 +2148,7 @@ bool RoamadomeControl::sendStopCommand()
     return false;
   }
   recordCommandedPercent(0);
+  lastSentPercent_.store(0);
   return true;
 }
 

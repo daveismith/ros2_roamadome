@@ -41,10 +41,11 @@ struct VelocityMap
 };
 
 /// Converts a joint velocity (rad/s) to the signed :DPR percent.
-/// 0 and NaN give 0. Otherwise p = p0 + |v| * k for the direction of v, replaced by
-/// 0 or min_percent when below min_percent, capped at 100, rounded, and given the sign
-/// percent_sign of the direction of v (+1 for the positive direction and -1 for the
-/// negative one is the identity mapping; the opposite signs flip the direction).
+/// 0 and NaN give 0. Otherwise p = p0 + |v| * k for the direction of v, rounded to an
+/// integer. If the rounded p is below min_percent (an integer 0..100) it is replaced by 0
+/// (BelowMinimum::ZERO) or by min_percent (BelowMinimum::MINIMUM). It is then capped at 100
+/// and given the sign percent_sign of the direction of v (+1 for the positive direction and
+/// -1 for the negative one is the identity mapping; the opposite signs flip the direction).
 inline int32_t velocityToPercent(double rad_per_sec, const VelocityMap & map)
 {
   if (std::isnan(rad_per_sec) || rad_per_sec == 0.0) {
@@ -52,16 +53,18 @@ inline int32_t velocityToPercent(double rad_per_sec, const VelocityMap & map)
   }
   const bool positive = rad_per_sec > 0.0;
   const VelocityMapDirection & dir = positive ? map.positive : map.negative;
-  double percent = dir.p0_percent + std::fabs(rad_per_sec) * dir.k_percent_per_rad_s;
+  double percent = std::round(dir.p0_percent + std::fabs(rad_per_sec) * dir.k_percent_per_rad_s);
   if (percent < dir.min_percent) {
     percent = (map.below_minimum == BelowMinimum::MINIMUM) ? dir.min_percent : 0.0;
   }
   percent = std::min(percent, 100.0);
-  const int32_t magnitude = static_cast<int32_t>(std::round(percent));
-  return dir.percent_sign * magnitude;
+  return dir.percent_sign * static_cast<int32_t>(percent);
 }
 
-/// The original linear mapping (percent sign +1 for v > 0, -1 for v < 0): percent = v / max_speed * 100, clamped to +-100.
+/// The original linear mapping (percent sign +1 for v > 0, -1 for v < 0), percent =
+/// v / max * 100 clamped to +-100. The result matches the old formula except possibly by one
+/// percent at exact half-point inputs, where |v| * (100 / max) and (v / max) * 100 differ
+/// by an ulp.
 inline VelocityMap linearVelocityMap(double max_speed_rad_per_sec)
 {
   const double k = 100.0 / max_speed_rad_per_sec;

@@ -106,4 +106,63 @@ TEST(VelocityMap, InfinityClampsToHundred)
   EXPECT_EQ(velocityToPercent(-std::numeric_limits<double>::infinity(), map), 100);
 }
 
+namespace
+{
+
+// k 1, p0 0 so that p equals |v|; min 32.
+VelocityMap identityMap(BelowMinimum below, double p0 = 0.0)
+{
+  return VelocityMap{
+    VelocityMapDirection{1.0, p0, 32.0, 1},
+    VelocityMapDirection{1.0, p0, 32.0, -1},
+    below};
+}
+
+}  // namespace
+
+TEST(VelocityMap, RoundedValueIsComparedWithMinimum)
+{
+  // p in [31.5, 32) rounds to 32, which is not below the minimum.
+  for (const BelowMinimum below : {BelowMinimum::ZERO, BelowMinimum::MINIMUM}) {
+    const VelocityMap map = identityMap(below);
+    EXPECT_EQ(velocityToPercent(31.5, map), 32);
+    EXPECT_EQ(velocityToPercent(31.9, map), 32);
+    EXPECT_EQ(velocityToPercent(-31.9, map), -32);
+    EXPECT_EQ(velocityToPercent(32.0, map), 32);
+  }
+  EXPECT_EQ(velocityToPercent(31.4, identityMap(BelowMinimum::ZERO)), 0);
+  EXPECT_EQ(velocityToPercent(31.4, identityMap(BelowMinimum::MINIMUM)), 32);
+}
+
+TEST(VelocityMap, CapAtHundredAfterRounding)
+{
+  const VelocityMap map = identityMap(BelowMinimum::ZERO);
+  EXPECT_EQ(velocityToPercent(99.6, map), 100);
+  EXPECT_EQ(velocityToPercent(100.4, map), 100);
+  EXPECT_EQ(velocityToPercent(-100.4, map), -100);
+  EXPECT_EQ(velocityToPercent(99.4, map), 99);
+}
+
+TEST(VelocityMap, MinimumModeWithP0AboveMinimum)
+{
+  const VelocityMap map = identityMap(BelowMinimum::MINIMUM, 40.0);
+  EXPECT_EQ(velocityToPercent(0.01, map), 40);   // 40.01 is not below 32
+  EXPECT_EQ(velocityToPercent(-0.01, map), -40);
+}
+
+TEST(VelocityMap, TinyVelocityInZeroModeIsZero)
+{
+  const VelocityMap map = calibration(BelowMinimum::ZERO);
+  EXPECT_EQ(velocityToPercent(1e-9, map), 0);
+  EXPECT_EQ(velocityToPercent(-1e-9, map), 0);
+  EXPECT_EQ(velocityToPercent(0.005, map), 0);
+}
+
+TEST(VelocityMap, TinyVelocityInMinimumModeIsMinimum)
+{
+  const VelocityMap map = calibration(BelowMinimum::MINIMUM);
+  EXPECT_EQ(velocityToPercent(0.005, map), -32);
+  EXPECT_EQ(velocityToPercent(-0.005, map), 32);
+}
+
 }  // namespace ros2_roamadome
