@@ -192,8 +192,8 @@ the three runs at 60 gave mean |e| 4.9, 7.0 and (per-move 100) 6.0, this one 6.3
 
 | direction | `min_percent` | 100 % (rad/s) | fit k (rad/s per %) | p0 (%) | R squared |
 |---|---|---|---|---|---|
-| positive percent (angle decreasing) | 32 (bracketed) | 6.79 | 0.0847 | 18.2 | 0.998 |
-| negative percent (angle increasing) | 32 (bracketed) | 6.58 | 0.0851 | 18.3 | 0.994 |
+| positive percent (angle decreasing) | 32 (bracketed) | 6.79 | 0.0851 | 18.2 | 0.998 |
+| negative percent (angle increasing) | 32 (bracketed) | 6.58 | 0.0837 | 18.3 | 0.994 |
 
 Phase 7 inputs from this run (`phase7` in the JSON): `max_speed_rad_per_sec` 6.58 (the lower
 measured 100 % rate; the fit value is 6.84), `positive_velocity` percent_sign -1, k 11.94 % per

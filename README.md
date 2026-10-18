@@ -701,6 +701,15 @@ the mapped percent changes. The resolved map is logged at INFO when the plugin s
 Acceptance points used for validation: 1.5 and 3.0 rad/s in both directions, with the telemetry
 velocity within 10 % of the commanded one after settling. With the values above the plugin sends
 `:DPR-36` for +1.5 rad/s, `:DPR36` for -1.5, `:DPR-54` for +3.0 and `:DPR53` for -3.0.
+Result on the dome (2026-10-17,
+[docs/bench_results/2026-10-17-phase7-acceptance.md](docs/bench_results/2026-10-17-phase7-acceptance.md)):
+**3.0 rad/s passes** in both directions in every run (within 4 %); **1.5 rad/s is marginal**:
+over eight windows 36 % ran the dome at 1.04 to 1.56 rad/s, four of them within 10 %, the
+slow ones after an hour of continuous use. Four points above the 32 % floor the speed is set
+by the dome's position-dependent friction, which the speed sweep shows too (its 32 and 35 %
+steps scatter by up to 22 % around the fit; from 40 % up it holds within 5 %). The mapping is
+validated from about 2 rad/s (42 %) upward; re-check 1.5 rad/s after the planned lubrication,
+with a fresh operating-settings speed sweep.
 
 ### Diagnostics
 
