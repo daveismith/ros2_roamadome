@@ -49,6 +49,32 @@ velocity map is unaffected (the speed sweeps are clean). Position moves and tele
 through 40 to 120 deg can read 40 to 100 deg wrong for a few reports, which a position
 controller would chase.
 
+## Are the faults at track edges?
+
+The ring has one track with 40 edges, and sensor i reads the track at dome angle minus 40 i
+(the decode table confirms this for every sensor: bit i of code(A) equals track(A - 40 i) at all
+360 angles). Track edges, in track degrees: 40, 42, 44, 62, 68, 70, 77, 83, 88, 95, 100, 103,
+111, 113, 116, 127, 131, 133, 136, 138, 144, 149, 155, 170, 174, 177, 194, 212, 221, 225, 227,
+259, 278, 281, 286, 312, 319, 325, 329, 346. Sensor 1's faults, converted to the track position
+under sensor 1 (dome angle - 40):
+
+| dome angle | track under sensor 1 | track value | nearest edge | sensor-1 flips recorded |
+|---|---|---|---|---|
+| 42 to 48 | 2 to 8 | 1 (solid) | 346, 17 to 22 deg away | 20 |
+| 78 | 38 | 1 | 40, 2 deg | 4 |
+| 87 | 47 | 0 | 44, 3 deg | 2 |
+| 95 to 98 | 55 to 58 | 0 | 62, 4 to 7 deg | 9 |
+| 118 to 120 | 78 to 80 | 1 | 77, 1 to 3 deg | 13 |
+
+So the main cluster is **not** an edge: at 42 to 48 deg sensor 1 sits in the middle of a 54 deg
+reflective segment (track 346 to 40) and still drops out. The smaller clusters are 1 to 7 deg
+from an edge, which is an edge zone several times wider than the other sensors show (the known
+benign race at dome 264 is one sample wide). Both say the same thing: sensor 1's signal margin
+is poor, enough that a weak spot of the plate under its path (track 2 to 8, which only sensor 1
+misreads; sensors 0 and 2 pass the same track stretch at dome 2 to 8 and 82 to 88 without
+flicker) and the transitions near 40 to 80 fall below its threshold. Gap, alignment or
+contamination of sensor 1, or of the plate along that stretch, rather than the track pattern.
+
 ## Next
 
 Inspect sensor 1 and the plate on that side (gap, squareness, cleanliness of the track);
