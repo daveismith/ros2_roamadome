@@ -377,17 +377,18 @@ Fudge 5, Scaling off** (new plate, dome installed; `MinSpeed` raised from 15 to 
 position-move settings tuned on 2026-10-16, SpeedTarget set to 60 during that tuning and
 back to 100 the same evening once the per-move speed probe showed it does not affect the
 moves). **The values to configure** come from the operating-settings speed sweep at exactly
-these settings (2026-10-16 21:41, "SpeedTarget back to 100" in
-[the position sweep report](docs/bench_results/2026-10-16-position-sweep-service.md); the
-earlier with-dome report, taken at MinSpeed 15, agrees within 4 % on k and on the top speed):
+these settings after the dome realignment of 2026-10-17
+([docs/bench_results/2026-10-17-realigned-dome.md](docs/bench_results/2026-10-17-realigned-dome.md);
+the 2026-10-16 runs before the realignment had the same top speed and floor but a higher p0
+and k, 18.3 / 11.9, because of more friction at the low end):
 
-- `max_speed_rad_per_sec` **6.58** (only sets the default `k`): the lower measured 100 % rate (-100 %); the fit value
-  is 6.84.
+- `max_speed_rad_per_sec` **6.55** (only sets the default `k`): the lower measured 100 % rate;
+  the fit value is 6.65.
 - `velocity_map.positive.*` (positive joint velocity): `percent_sign` -1, `k_percent_per_rad_s`
-  **11.94**, `p0_percent` **18.3**, `min_percent` **32**.
+  **13.00**, `p0_percent` **13.0**, `min_percent` **32**.
 - `velocity_map.negative.*` (negative joint velocity): `percent_sign` +1, `k_percent_per_rad_s`
-  **11.75**, `p0_percent` **18.2**, `min_percent` **32**.
-- A single shared set would be k 11.9, p0 18.3, `min_percent` 32 (the plugin takes both).
+  **13.12**, `p0_percent` **12.8**, `min_percent` **32**.
+- A single shared set would be k 13.1, p0 12.9, `min_percent` 32 (the plugin takes both).
 
 `min_percent` is the larger of the raw and operating-settings runs per direction (see (b)).
 
@@ -518,7 +519,7 @@ value per direction; use the per-direction parameter names exactly as listed in
 set is supported, take the larger `min_percent` and `p0_percent` of the two. For
 `max_speed_rad_per_sec` use the measured 100 % values, not `phase7.max_speed_rad_per_sec`,
 which is the lower of the two fit extrapolations (100 - p0) / k. Here it only sets the default
-`k`, so the measured 100 % rate is what to enter (6.58 on the current setup).
+`k`, so the measured 100 % rate is what to enter (6.55 on the current setup).
 
 Sign convention: on the bench robot (firmware `Inverted` true) a **positive** percent moves the
 reported angle **down**, so positive joint velocity needs a negative percent
@@ -703,13 +704,15 @@ velocity within 10 % of the commanded one after settling. With the values above 
 `:DPR-36` for +1.5 rad/s, `:DPR36` for -1.5, `:DPR-54` for +3.0 and `:DPR53` for -3.0.
 Result on the dome (2026-10-17,
 [docs/bench_results/2026-10-17-phase7-acceptance.md](docs/bench_results/2026-10-17-phase7-acceptance.md)):
-**3.0 rad/s passes** in both directions in every run (within 4 %); **1.5 rad/s is marginal**:
-over eight windows 36 % ran the dome at 1.04 to 1.56 rad/s, four of them within 10 %, the
-slow ones after an hour of continuous use. Four points above the 32 % floor the speed is set
-by the dome's position-dependent friction, which the speed sweep shows too (its 32 and 35 %
-steps scatter by up to 22 % around the fit; from 40 % up it holds within 5 %). The mapping is
-validated from about 2 rad/s (42 %) upward; re-check 1.5 rad/s after the planned lubrication,
-with a fresh operating-settings speed sweep.
+**3.0 rad/s passes** in both directions in every run (within 4 %); **1.5 rad/s does not**:
+before the realignment 36 % ran the dome at 1.04 to 1.56 rad/s over eight windows (four
+within 10 %), and after it, with the lower p0, 1.5 rad/s maps to the 32 % floor itself, which
+runs 1.16 to 1.30 rad/s (14 to 23 % slow, see
+[the realignment report](docs/bench_results/2026-10-17-realigned-dome.md)). Near the floor the
+speed is set by the dome's friction, not the command; from about 2 rad/s (39 %) up the fit
+holds within 5 %. To bring 1.5 rad/s inside the band, lower the floor: try `MinSpeed` 28 and
+25 now that the friction is reduced (they stalled on the 16th), then re-run the operating
+settings speed sweep and the position sweep.
 
 ### Diagnostics
 
