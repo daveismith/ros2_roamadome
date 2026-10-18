@@ -192,6 +192,10 @@ hardware_interface::CallbackReturn RoamadomeControl::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  if (!parseVelocityMapParameters(parameters)) {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   if (!parseOptionalBoolParameter(parameters, logger_, "auto_mode", false, &autoModeEnabled_)) {
     return hardware_interface::CallbackReturn::ERROR;
   }
@@ -1697,17 +1701,77 @@ double RoamadomeControl::radiansToDegrees(double radians) const
 
 int32_t RoamadomeControl::velocityToPercentage(double rad_per_sec) const
 {
-  // Scale rad/s to [-100, 100] percentage based on maxSpeedRadPerSec_
-  double percentage = (rad_per_sec / maxSpeedRadPerSec_) * 100.0;
+  return velocityToPercent(rad_per_sec, velocityMap_);
+}
 
-  // Clamp to valid range
-  if (percentage > 100.0) {
-    percentage = 100.0;
-  } else if (percentage < -100.0) {
-    percentage = -100.0;
+bool RoamadomeControl::parseVelocityMapParameters(
+  const std::unordered_map<std::string, std::string> & parameters)
+{
+  // k defaults to 100 / max_speed_rad_per_sec, so max_speed_rad_per_sec must be parsed first.
+  const double default_k = 100.0 / maxSpeedRadPerSec_;
+  VelocityMap map = linearVelocityMap(maxSpeedRadPerSec_);
+  const auto parse_direction =
+    [&](const std::string & prefix, VelocityMapDirection * dir) {
+      if (!parseOptionalDoubleParameter(
+          parameters, logger_, prefix + ".k_percent_per_rad_s", default_k,
+          [](double value) {return std::isfinite(value) && value > 0.0;},
+          "finite and > 0", &dir->k_percent_per_rad_s))
+      {
+        return false;
+      }
+      if (!parseOptionalDoubleParameter(
+          parameters, logger_, prefix + ".p0_percent", 0.0,
+          [](double value) {return std::isfinite(value);},
+          "finite", &dir->p0_percent))
+      {
+        return false;
+      }
+      if (!parseOptionalDoubleParameter(
+          parameters, logger_, prefix + ".min_percent", 0.0,
+          [](double value) {return value >= 0.0 && value <= 100.0;},
+          "0..100", &dir->min_percent))
+      {
+        return false;
+      }
+      double sign = dir->percent_sign;
+      if (!parseOptionalDoubleParameter(
+          parameters, logger_, prefix + ".percent_sign", sign,
+          [](double value) {return value == 1.0 || value == -1.0;},
+          "1 or -1", &sign))
+      {
+        return false;
+      }
+      dir->percent_sign = static_cast<int>(sign);
+      return true;
+    };
+
+  if (!parse_direction("velocity_map.positive", &map.positive) ||
+    !parse_direction("velocity_map.negative", &map.negative))
+  {
+    return false;
   }
 
-  return static_cast<int32_t>(std::round(percentage));
+  std::string below_minimum;
+  if (!parseOptionalEnumParameter(
+      parameters, logger_, "velocity_map.below_minimum", "zero", {"zero", "minimum"},
+      &below_minimum))
+  {
+    return false;
+  }
+  map.below_minimum = below_minimum == "minimum" ? BelowMinimum::MINIMUM : BelowMinimum::ZERO;
+  velocityMap_ = map;
+
+  RCLCPP_INFO(
+    logger_,
+    "Velocity map: positive v -> percent_sign %+d, k %.4f %%/(rad/s), p0 %.3f %%, min %.1f %%; "
+    "negative v -> percent_sign %+d, k %.4f %%/(rad/s), p0 %.3f %%, min %.1f %%; "
+    "below minimum: %s",
+    map.positive.percent_sign, map.positive.k_percent_per_rad_s, map.positive.p0_percent,
+    map.positive.min_percent,
+    map.negative.percent_sign, map.negative.k_percent_per_rad_s, map.negative.p0_percent,
+    map.negative.min_percent,
+    below_minimum.c_str());
+  return true;
 }
 
 std::string RoamadomeControl::positionCommandString(uint32_t degrees, uint32_t speed_percent) const

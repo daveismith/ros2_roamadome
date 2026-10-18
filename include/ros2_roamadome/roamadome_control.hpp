@@ -13,6 +13,7 @@
 #include "ros2_roamadome/firmware_line_classifier.hpp"
 #include "ros2_roamadome/position_tracker.hpp"
 #include "ros2_roamadome/report_plausibility_gate.hpp"
+#include "ros2_roamadome/velocity_map.hpp"
 #include "ros2_roamadome/visibility_control.h"
 #include "ros2_roamadome/roamadome_serial_port.hpp"
 #include "hardware_interface/actuator_interface.hpp"
@@ -32,6 +33,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <unordered_map>
 
 using hardware_interface::return_type;
 
@@ -194,6 +196,8 @@ private:
   uint32_t normalizeAngleDegrees(double radians) const;
   double radiansToDegrees(double radians) const;
   int32_t velocityToPercentage(double rad_per_sec) const;
+  bool parseVelocityMapParameters(
+    const std::unordered_map<std::string, std::string> & parameters);
   /// ":DPA<deg>[,<percent>]": a non-zero speed_percent wins, else position_move_speed_percent.
   std::string positionCommandString(uint32_t degrees, uint32_t speed_percent) const;
   bool sendPositionCommand(uint32_t degrees, uint32_t speed_percent = 0);
@@ -262,6 +266,7 @@ private:
   // no bench drive may start. Set from the write path, cleared from the read path.
   std::atomic<bool> firmwareMoveOutstanding_{false};
   double maxSpeedRadPerSec_ = 3.14;  // Default: ~180°/s (configurable via parameter)
+  VelocityMap velocityMap_ = linearVelocityMap(3.14);  // resolved in on_init
   uint32_t serialSectionFlushTimeoutMs_ = 500;
 
   std::unique_ptr<RoamadomeSerialPort> serialHandler_;

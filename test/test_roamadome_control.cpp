@@ -1155,6 +1155,69 @@ TEST_F(RoamadomeControlTest, ParameterParsing_StartupLogLevel_InvalidFails)
   EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
 }
 
+TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_AllAccepted)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["velocity_map.positive.k_percent_per_rad_s"] = "11.94";
+  info.hardware_parameters["velocity_map.positive.p0_percent"] = "18.3";
+  info.hardware_parameters["velocity_map.positive.min_percent"] = "32";
+  info.hardware_parameters["velocity_map.positive.percent_sign"] = "-1";
+  info.hardware_parameters["velocity_map.negative.k_percent_per_rad_s"] = "11.75";
+  info.hardware_parameters["velocity_map.negative.p0_percent"] = "18.2";
+  info.hardware_parameters["velocity_map.negative.min_percent"] = "32";
+  info.hardware_parameters["velocity_map.negative.percent_sign"] = "1";
+  info.hardware_parameters["velocity_map.below_minimum"] = "minimum";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_PercentSignTwoFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["velocity_map.positive.percent_sign"] = "2";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_MinPercentTooLargeFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["velocity_map.negative.min_percent"] = "101";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_NonPositiveKFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["velocity_map.positive.k_percent_per_rad_s"] = "0";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST_F(RoamadomeControlTest, ParameterParsing_VelocityMap_BelowMinimumInvalidFails)
+{
+  hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
+  info.hardware_parameters["velocity_map.below_minimum"] = "sometimes";
+
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+
+  EXPECT_EQ(controller_->on_init(params), hardware_interface::CallbackReturn::ERROR);
+}
+
 TEST_F(RoamadomeControlTest, ParameterParsing_AutoMode_InvalidFails)
 {
   hardware_interface::HardwareInfo info = createMockHardwareInfo(1);
@@ -3299,6 +3362,35 @@ TEST_F(BenchModeTest, VelocityModeSwitch_SendsFirstNonZeroCommandOnly)
   setCommandVelocityForTest(0.0);
   writeOnce();
   ASSERT_TRUE(firmware.waitFor(":DPR0", 1000));
+}
+
+TEST_F(BenchModeTest, VelocityMap_ConfiguredMapIsUsedOnTheWire)
+{
+  PseudoTerminal pty;
+  ASSERT_TRUE(pty.valid());
+  bringUp(
+    &pty, false, {
+      {"max_speed_rad_per_sec", "6.58"},
+      {"velocity_map.positive.k_percent_per_rad_s", "11.94"},
+      {"velocity_map.positive.p0_percent", "18.3"},
+      {"velocity_map.positive.min_percent", "32"},
+      {"velocity_map.positive.percent_sign", "-1"},
+      {"velocity_map.negative.k_percent_per_rad_s", "11.75"},
+      {"velocity_map.negative.p0_percent", "18.2"},
+      {"velocity_map.negative.min_percent", "32"},
+      {"velocity_map.negative.percent_sign", "1"},
+    });
+  AckFirmware firmware(&pty);
+  configureAndActivate();
+  firmware.clear();
+
+  ASSERT_EQ(switchToVelocityForTest(), hardware_interface::return_type::OK);
+  setCommandVelocityForTest(1.5);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR-36", 1000));
+  setCommandVelocityForTest(-1.5);
+  writeOnce();
+  ASSERT_TRUE(firmware.waitFor(":DPR36", 1000));
 }
 
 }  // namespace ros2_roamadome

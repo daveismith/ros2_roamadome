@@ -113,6 +113,13 @@ if(BUILD_TESTING)
     $<INSTALL_INTERFACE:include>
   )
 
+  # Unit tests for the velocity map (header-only, no ROS dependency)
+  ament_add_gtest(test_velocity_map test/test_velocity_map.cpp)
+  target_include_directories(test_velocity_map PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+
   # Unit tests for the report plausibility gate (header-only, no ROS dependency)
   ament_add_gtest(test_report_plausibility_gate test/test_report_plausibility_gate.cpp)
   target_include_directories(test_report_plausibility_gate PUBLIC
