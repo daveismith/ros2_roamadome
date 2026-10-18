@@ -372,23 +372,26 @@ Worked example: this is exactly the situation on the bench robot.
   0-crossing wrap allowance and the plugin's plausibility gate were validated on the dome
   ([docs/bench_results/2026-10-16-position-sweep-service.md](docs/bench_results/2026-10-16-position-sweep-service.md)).
 
-**The calibration state is MaxSpeed 80, MinSpeed 32, SpeedTarget 100, DecelerationScale 250,
-Fudge 5, Scaling off** (new plate, dome installed; `MinSpeed` raised from 15 to 32 and the
-position-move settings tuned on 2026-10-16, SpeedTarget set to 60 during that tuning and
-back to 100 the same evening once the per-move speed probe showed it does not affect the
-moves). **The values to configure** come from the operating-settings speed sweep at exactly
-these settings after the dome realignment of 2026-10-17
+**The calibration state is MaxSpeed 80, MinSpeed 20, SpeedTarget 100, DecelerationScale 250,
+Fudge 5, Scaling off** (new plate, dome installed and realigned 2026-10-17; `MinSpeed` was 32
+from the 2026-10-16 tuning, when 25 and 28 stalled at the tight spots, and went to 20 on
+2026-10-17 after the realignment: 20 is clean, 15 is where the approach stops short, see the
+MinSpeed study in
+[docs/bench_results/2026-10-17-realigned-dome.md](docs/bench_results/2026-10-17-realigned-dome.md);
+SpeedTarget was set to 60 during the 16th's tuning and back to 100 the same evening once the
+per-move speed probe showed it does not affect the moves). **The values to configure** come from the operating-settings speed sweep at exactly
+these settings at MinSpeed 20 after the dome realignment of 2026-10-17
 ([docs/bench_results/2026-10-17-realigned-dome.md](docs/bench_results/2026-10-17-realigned-dome.md);
 the 2026-10-16 runs before the realignment had the same top speed and floor but a higher p0
 and k, 18.3 / 11.9, because of more friction at the low end):
 
-- `max_speed_rad_per_sec` **6.55** (only sets the default `k`): the lower measured 100 % rate;
-  the fit value is 6.65.
+- `max_speed_rad_per_sec` **6.62** (only sets the default `k`): the lower measured 100 % rate;
+  the fit value is 6.75.
 - `velocity_map.positive.*` (positive joint velocity): `percent_sign` -1, `k_percent_per_rad_s`
-  **13.00**, `p0_percent` **13.0**, `min_percent` **32**.
+  **12.75**, `p0_percent` **13.9**, `min_percent` **20**.
 - `velocity_map.negative.*` (negative joint velocity): `percent_sign` +1, `k_percent_per_rad_s`
-  **13.12**, `p0_percent` **12.8**, `min_percent` **32**.
-- A single shared set would be k 13.1, p0 12.9, `min_percent` 32 (the plugin takes both).
+  **12.36**, `p0_percent` **14.5**, `min_percent` **22**.
+- A single shared set would be k 12.6, p0 14.2, `min_percent` 22 (the plugin takes both).
 
 `min_percent` is the larger of the raw and operating-settings runs per direction (see (b)).
 
@@ -519,7 +522,7 @@ value per direction; use the per-direction parameter names exactly as listed in
 set is supported, take the larger `min_percent` and `p0_percent` of the two. For
 `max_speed_rad_per_sec` use the measured 100 % values, not `phase7.max_speed_rad_per_sec`,
 which is the lower of the two fit extrapolations (100 - p0) / k. Here it only sets the default
-`k`, so the measured 100 % rate is what to enter (6.55 on the current setup).
+`k`, so the measured 100 % rate is what to enter (6.62 on the current setup).
 
 Sign convention: on the bench robot (firmware `Inverted` true) a **positive** percent moves the
 reported angle **down**, so positive joint velocity needs a negative percent
@@ -673,10 +676,13 @@ below 30 the approach stalls at the ring's tight spots (MinSpeed 25: within 4 de
 when it completes, but 2 of 18 moves stalled; 28: within 8, 1 stall in 18; 30:
 within 8, no stalls; 32: within 6 typical, one 12 deg outlier in 18, no stalls).
 Fudge 3 adds about 3 deg of overshoot on short moves, which arrive at 60-75 deg/s
-regardless of the floor. `DecelerationScale` 250 and `Fudge` 5 with `MinSpeed` 32 are now set (2026-10-16) and
-are the calibration state; `SpeedTarget` went from 60 back to 100 the same evening (it
-does not change the moves, see (e)): the position sweep at 100 gave +7, -10, +7, -8, +1,
--10, +4, -5, +2, -11, +3, -7. Getting below
+regardless of the floor. `DecelerationScale` 250 and `Fudge` 5 with `MinSpeed` 32 were set on 2026-10-16;
+`SpeedTarget` went from 60 back to 100 the same evening (it does not change the moves, see
+(e)): the position sweep at 100 gave +7, -10, +7, -8, +1, -10, +4, -5, +2, -11, +3, -7. After
+the dome realignment of 2026-10-17 the floor could come down: MinSpeed 25 gave +1, -9, +3,
+-5, -2, -5, +4, -3, 0, -8, +2, -4 and **MinSpeed 20 gave 0, +4, +8, +2, +5, +3, +5, +3, 0,
++2, +7, +2** (mean 3.4 deg, no stalls), while 15 stopped short by up to 43 deg. **MinSpeed 20
+is the calibration state** (the velocity map's `min_percent` follows it: 20 / 22). Getting below
 this needs a shorter stopping distance (a configurable Sabertooth ramp in the
 firmware) or a host-side final nudge, not more fudge tuning.
 Redo this step after any change to the dome's mass or friction, or to `MinSpeed`.
