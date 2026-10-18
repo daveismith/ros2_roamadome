@@ -372,22 +372,26 @@ Worked example: this is exactly the situation on the bench robot.
   0-crossing wrap allowance and the plugin's plausibility gate were validated on the dome
   ([docs/bench_results/2026-10-16-position-sweep-service.md](docs/bench_results/2026-10-16-position-sweep-service.md)).
 
-**The calibration state is MaxSpeed 80, MinSpeed 32, SpeedTarget 100, DecelerationScale 250,
-Fudge 5, Scaling off** (new plate, dome installed; `MinSpeed` raised from 15 to 32 and the
-position-move settings tuned on 2026-10-16, SpeedTarget set to 60 during that tuning and
-back to 100 the same evening once the per-move speed probe showed it does not affect the
-moves). **The values to configure** come from the operating-settings speed sweep at exactly
-these settings (2026-10-16 21:41, "SpeedTarget back to 100" in
-[the position sweep report](docs/bench_results/2026-10-16-position-sweep-service.md); the
-earlier with-dome report, taken at MinSpeed 15, agrees within 4 % on k and on the top speed):
+**The calibration state is MaxSpeed 80, MinSpeed 20, SpeedTarget 100, DecelerationScale 250,
+Fudge 5, Scaling off** (new plate, dome installed and realigned 2026-10-17; `MinSpeed` was 32
+from the 2026-10-16 tuning, when 25 and 28 stalled at the tight spots, and went to 20 on
+2026-10-17 after the realignment: 20 is clean, 15 is where the approach stops short, see the
+MinSpeed study in
+[docs/bench_results/2026-10-17-realigned-dome.md](docs/bench_results/2026-10-17-realigned-dome.md);
+SpeedTarget was set to 60 during the 16th's tuning and back to 100 the same evening once the
+per-move speed probe showed it does not affect the moves). **The values to configure** come from the operating-settings speed sweep at exactly
+these settings at MinSpeed 20 after the dome realignment of 2026-10-17
+([docs/bench_results/2026-10-17-realigned-dome.md](docs/bench_results/2026-10-17-realigned-dome.md);
+the 2026-10-16 runs before the realignment had the same top speed and floor but a higher p0
+and k, 18.3 / 11.9, because of more friction at the low end):
 
-- `max_speed_rad_per_sec` **6.58**: the lower measured 100 % rate (-100 %); the fit value
-  is 6.84.
-- `positive_velocity`: `percent_sign` -1, `k_percent_per_rad_s` **11.94**, `p0_percent`
-  **18.3**, `min_percent` **32**.
-- `negative_velocity`: `percent_sign` +1, `k_percent_per_rad_s` **11.75**, `p0_percent`
-  **18.2**, `min_percent` **32**.
-- If only one parameter set is supported: k 11.9, p0 18.3, `min_percent` 32.
+- `max_speed_rad_per_sec` **6.62** (only sets the default `k`): the lower measured 100 % rate;
+  the fit value is 6.75.
+- `velocity_map.positive.*` (positive joint velocity): `percent_sign` -1, `k_percent_per_rad_s`
+  **12.75**, `p0_percent` **13.9**, `min_percent` **20**.
+- `velocity_map.negative.*` (negative joint velocity): `percent_sign` +1, `k_percent_per_rad_s`
+  **12.36**, `p0_percent` **14.5**, `min_percent` **22**.
+- A single shared set would be k 12.6, p0 14.2, `min_percent` 22 (the plugin takes both).
 
 `min_percent` is the larger of the raw and operating-settings runs per direction (see (b)).
 
@@ -517,8 +521,8 @@ value per direction; use the per-direction parameter names exactly as listed in
 [Configuration Parameters](#configuration-parameters) once phase 7 has merged, and if only one
 set is supported, take the larger `min_percent` and `p0_percent` of the two. For
 `max_speed_rad_per_sec` use the measured 100 % values, not `phase7.max_speed_rad_per_sec`,
-which is the lower of the two fit extrapolations k (100 - p0). With the dome on the new plate that
-was 6.88, against a measured 6.56 rad/s.
+which is the lower of the two fit extrapolations (100 - p0) / k. Here it only sets the default
+`k`, so the measured 100 % rate is what to enter (6.62 on the current setup).
 
 Sign convention: on the bench robot (firmware `Inverted` true) a **positive** percent moves the
 reported angle **down**, so positive joint velocity needs a negative percent
@@ -535,9 +539,11 @@ Set the values in the RoamADome block of `src/r2_bringup/urdf/ros2_control.xacro
         <plugin>ros2_roamadome/RoamadomeControl</plugin>
         <param name="serial_port">...</param>
         <param name="max_speed_rad_per_sec">MEASURED_RATE_AT_100</param>
-        <param name="velocity_map.k_percent_per_rad_s">K</param>
-        <param name="velocity_map.p0_percent">P0</param>
-        <param name="velocity_map.min_percent">MIN</param>
+        <param name="velocity_map.positive.k_percent_per_rad_s">K</param>
+        <param name="velocity_map.positive.p0_percent">P0</param>
+        <param name="velocity_map.positive.min_percent">MIN</param>
+        <param name="velocity_map.positive.percent_sign">-1</param>
+        <!-- and the same four under velocity_map.negative. -->
         <!-- assembled-dome values from docs/bench_results/<date>-<dome>.md -->
         ...
 ```
@@ -551,39 +557,29 @@ source install/setup.bash
 ros2 launch r2_bringup launch_robot.launch.py dome_bench:=true   # for the check in (d)
 ```
 
-**(d) Acceptance check** (plan phase 7): a commanded 0.5 rad/s gives a telemetry velocity
-within 10 % of 0.5 rad/s, in both directions, after settling. Use the `dome_bench:=true` launch
+**(d) Acceptance check** (plan phase 7, points chosen 2026-10-17): a commanded +-1.5 and +-3.0
+rad/s gives a telemetry velocity within 10 % of the command, in both directions, after settling.
+The plan's 0.5 rad/s is unreachable with the dome: the 32 % `min_percent` floor is about
+1 rad/s, and 1.0 rad/s maps to 30 %, below the floor, so with `velocity_map.below_minimum` `zero`
+(the default) the plugin sends `:DPR0` there by design. Use the `dome_bench:=true` launch
 (telemetry on, no `dome_controller`), make sure no sweep runs, then load the velocity
 controller by hand; the bench drive is refused while it holds the dome:
 
 ```bash
 ros2 control load_controller --set-state active dome_controller
-ros2 topic pub -r 10 /dome_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"
+ros2 topic pub -r 10 /dome_controller/commands std_msgs/msg/Float64MultiArray "{data: [1.5]}"
 # second terminal, after about 2 s of settling: mean and sample count over 5 s
 timeout 5 ros2 topic echo /roamadome/telemetry --field velocity_rad_s \
   | grep -E '^-?[0-9]' | awk '{s += $1; n++} END {print s / n, n}'
-# Ctrl-C the publisher, stop the dome, repeat with -0.5
+# Ctrl-C the publisher, stop the dome, repeat with -1.5, 3.0 and -3.0
 ros2 topic pub --once /dome_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.0]}"
 ```
 
-Pass: the mean is between 0.45 and 0.55 for +0.5 and between -0.55 and -0.45 for -0.5. Then
+Pass: the mean is within 10 % of the command (1.35 to 1.65 for +1.5, -1.65 to -1.35 for -1.5,
+and likewise for +-3.0). The plugin sends `:DPR-36`, `:DPR36`, `:DPR-54` and `:DPR53`. Then
 `ros2 topic pub --once ... "{data: [0.0]}"`, `ros2 control set_controller_state dome_controller
 inactive` and `ros2 control unload_controller dome_controller`, and relaunch without
-`dome_bench` for normal use. If 0.5 rad/s is below `velocity_at_min_percent_rad_s` of a
-direction, the mapping clamps up to `min_percent` and the check cannot pass in that direction.
-Without the dome it was marginal (0.50 to 1.09 rad/s at the minimum percentages on
-2026-10-16).
-
-**With the dome, the 0.5 rad/s check cannot pass in either direction** (2026-10-16, new plate):
-
-- +0.5 rad/s maps to 26.2 % and clamps to `min_percent` 27, which moved at 0.45 rad/s, just
-  outside the tolerance.
-- -0.5 rad/s maps to 27.7 % and clamps to 32, which runs at about 1.08 rad/s.
-
-The slowest dependable speed is about 1 rad/s. With the dome, run the check at **1.0 rad/s**
-(and -1.0): the fit gives 31.9 % and 33.4 %, above both minima, so the mapping is not clamped.
-Changing the acceptance point is a decision for the human (plan section 10). Record the point
-used and the result in the bench report.
+`dome_bench` for normal use. Record the points used and the result in the bench report.
 
 **(e) The firmware settings are part of the calibration.** `MaxSpeed`, `SpeedTarget`,
 `MinSpeed` and `Scaling` all sit between the percent the plugin sends and the motor
@@ -680,20 +676,47 @@ below 30 the approach stalls at the ring's tight spots (MinSpeed 25: within 4 de
 when it completes, but 2 of 18 moves stalled; 28: within 8, 1 stall in 18; 30:
 within 8, no stalls; 32: within 6 typical, one 12 deg outlier in 18, no stalls).
 Fudge 3 adds about 3 deg of overshoot on short moves, which arrive at 60-75 deg/s
-regardless of the floor. `DecelerationScale` 250 and `Fudge` 5 with `MinSpeed` 32 are now set (2026-10-16) and
-are the calibration state; `SpeedTarget` went from 60 back to 100 the same evening (it
-does not change the moves, see (e)): the position sweep at 100 gave +7, -10, +7, -8, +1,
--10, +4, -5, +2, -11, +3, -7. Getting below
+regardless of the floor. `DecelerationScale` 250 and `Fudge` 5 with `MinSpeed` 32 were set on 2026-10-16;
+`SpeedTarget` went from 60 back to 100 the same evening (it does not change the moves, see
+(e)): the position sweep at 100 gave +7, -10, +7, -8, +1, -10, +4, -5, +2, -11, +3, -7. After
+the dome realignment of 2026-10-17 the floor could come down: MinSpeed 25 gave +1, -9, +3,
+-5, -2, -5, +4, -3, 0, -8, +2, -4 and **MinSpeed 20 gave 0, +4, +8, +2, +5, +3, +5, +3, 0,
++2, +7, +2** (mean 3.4 deg, no stalls), while 15 stopped short by up to 43 deg. **MinSpeed 20
+is the calibration state** (the velocity map's `min_percent` follows it: 20 / 22). Getting below
 this needs a shorter stopping distance (a configurable Sabertooth ramp in the
 firmware) or a host-side final nudge, not more fudge tuning.
 Redo this step after any change to the dome's mass or friction, or to `MinSpeed`.
 
-**(f) Until phase 7 lands** the plugin still uses the linear mapping
-`percent = velocity / max_speed_rad_per_sec * 100`, rounded and clamped to ±100, with the sign
-passed straight through (so on the bench robot a positive velocity command moves the joint
-negative) and no minimum-percent handling (with the dome, below about 30 % the dome stalls). Only
-`max_speed_rad_per_sec` applies; set it to the measured rate at 100 % so that full scale
-matches. The `velocity_map.*` values stay in the bench report until the plugin accepts them.
+**(f) The velocity mapping in the plugin.** Per direction of rotation (the sign of the joint
+velocity `v`) the plugin computes `p = round(p0_percent + |v| * k_percent_per_rad_s)`. If that
+rounded `p` is below the direction's `min_percent` (an integer 0..100), `p` becomes 0
+(`velocity_map.below_minimum` `zero`, the default, so the dome stops rather than stalls) or
+`min_percent` (`minimum`). Then `p` is capped at 100 and sent as `:DPR<percent_sign * p>`. `v` = 0 (or NaN) sends 0. `percent_sign` is the sign
+of the percent sent for that direction: on the dome a positive joint velocity needs a negative
+percent, so `velocity_map.positive.percent_sign` is -1 and the plugin makes a positive command turn
+the joint positive; a controller or teleop scale must not compensate for it any more. With none of
+the `velocity_map.*` parameters set the plugin keeps the old linear mapping
+`percent = velocity / max_speed_rad_per_sec * 100` (rounded, clamped to +-100, sign passed
+through; within one percent of the old formula at exact half-point inputs, where an ulp differs). `max_speed_rad_per_sec` keeps its name but now means the measured rate at 100 % and only
+sets the default `k` (`100 / max_speed_rad_per_sec`); with the fit, the clamp at 100 % comes from
+`k` and `p0`. The plugin refuses to start if the two `percent_sign` values are equal (the motor
+sign is one physical fact), if a `velocity_map.*` name is unknown, or if `min_percent` is not an
+integer; it warns when a direction has only some of its four keys. A command is re-sent only when
+the mapped percent changes. The resolved map is logged at INFO when the plugin starts. The firmware's `MaxSpeed`,
+`MinSpeed`, `SpeedTarget` and `Scaling` are part of the calibration state (see above).
+
+Acceptance points used for validation: 1.5 and 3.0 rad/s in both directions, with the telemetry
+velocity within 10 % of the commanded one after settling. With the values above the plugin sends
+`:DPR-36` for +1.5 rad/s, `:DPR36` for -1.5, `:DPR-54` for +3.0 and `:DPR53` for -3.0.
+Result on the dome (2026-10-17,
+[docs/bench_results/2026-10-17-phase7-acceptance.md](docs/bench_results/2026-10-17-phase7-acceptance.md)):
+**3.0 rad/s passes** in both directions in every run (within 6 %); **1.5 rad/s is at the
+edge of the band**: with MinSpeed 20 it maps to 33 % and ran 1.31 to 1.65 rad/s over four
+windows, three within 10 % (at MinSpeed 32 it sat on the floor itself and ran 14 to 23 % slow;
+see [the realignment report](docs/bench_results/2026-10-17-realigned-dome.md)). Within a few
+points of the floor the speed is set by the dome's sector-to-sector friction, not the
+command: 1.0 rad/s (27 %) is commandable now but runs 0.68 to 0.81. From about 2 rad/s (39 %)
+up the fit holds within 5 %.
 
 ### Diagnostics
 
@@ -815,7 +838,16 @@ The following parameters can be specified in your URDF/XACRO hardware descriptio
 |-----------|------|---------|-------------|
 | `serial_port` | string | *required* | Serial port device path (e.g., `/dev/ttyACM0`) |
 | `serial_baud` | uint32 | `115200` | Serial baud rate |
-| `max_speed_rad_per_sec` | double | `3.14` | Maximum dome angular velocity in rad/s (~180°/s) |
+| `max_speed_rad_per_sec` | double | `3.14` | Measured dome rate at 100 % in rad/s (default ~180°/s), must be > 0. It only sets the default of `velocity_map.*.k_percent_per_rad_s` (`100 / max_speed_rad_per_sec`); with a fitted map the clamp at 100 % comes from `k` and `p0` |
+| `velocity_map.positive.k_percent_per_rad_s` | double | `100 / max_speed_rad_per_sec` | Slope for a positive joint velocity, % per rad/s, finite and > 0 (see [step (f)](#re-tuning-the-velocity-mapping-when-the-dome-changes)) |
+| `velocity_map.positive.p0_percent` | double | `0` | Intercept for a positive joint velocity, %, any finite value |
+| `velocity_map.positive.min_percent` | double | `0` | Smallest percent that moves the dome for a positive velocity, an integer 0..100; compared with the rounded fit |
+| `velocity_map.positive.percent_sign` | int | `1` | Sign of the percent sent for a positive velocity, exactly `1` or `-1` |
+| `velocity_map.negative.k_percent_per_rad_s` | double | `100 / max_speed_rad_per_sec` | As above, for a negative joint velocity |
+| `velocity_map.negative.p0_percent` | double | `0` | As above, for a negative joint velocity |
+| `velocity_map.negative.min_percent` | double | `0` | As above, for a negative joint velocity |
+| `velocity_map.negative.percent_sign` | int | `-1` | Sign of the percent sent for a negative velocity, exactly `1` or `-1`, and different from the positive one; the default `-1` is the linear mapping, `1` flips the direction |
+| `velocity_map.below_minimum` | string | `zero` | `zero` or `minimum`: what to send when the fit is below `min_percent` |
 | `publish_telemetry` | bool | `false` | Publish `astromech_msgs/DomeTelemetry` on `~/telemetry` for every position report |
 | `velocity_window_s` | double | `0.5` | Trailing regression window for the velocity estimate (s), must be > 0 |
 | `enable_bench_mode` | bool | `false` | Create the raw drive service `~/bench/drive` (see [Bench mode](#bench-mode)); normally set by the `dome_bench` launch argument |
