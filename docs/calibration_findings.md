@@ -5,9 +5,10 @@ mapping when the dome changes"). The README keeps the instructions; this file ke
 found on the bench robot, when, and the numbers that are configured today. Every run's own
 report lives in `docs/bench_results/`.
 
-## Current calibration state (2026-10-17)
+## Current calibration state (2026-11-01)
 
-Dome installed on the new sensor plate, realigned on 2026-10-17. Firmware settings (persisted
+Dome installed on the new sensor plate, in the holder reprinted on 2026-11-01 with a permanent
+spacing change. Firmware settings (persisted
 on the controller, read back through `device.*`):
 
 | Setting | Value | Why |
@@ -19,21 +20,25 @@ on the controller, read back through `device.*`):
 | `Fudge` | 5 | Fudge study of 2026-10-16 (user limit: at most 5) |
 | `Scaling` | off | |
 | WiFi | off | Controller restart avoided during runs |
+| `Inverted` | true | Position moves hunt forever when false; `#DPSETUP` can rewrite it (see Position moves) |
+| `HomePos` | 128 | Set by the user; reported angles are offset from ring angles |
 
 Velocity map, from the operating-settings speed sweep at MinSpeed 20
-([2026-10-17-realigned-dome.md](bench_results/2026-10-17-realigned-dome.md), MinSpeed study),
+([2026-11-01-holder-and-spacer.md](bench_results/2026-11-01-holder-and-spacer.md)),
 configured in `r2_bringup/urdf/ros2_control.xacro`:
 
 | Parameter | Value |
 |---|---|
-| `max_speed_rad_per_sec` | 6.62 (the lower measured 100 % rate; the fit extrapolates 6.75) |
-| `velocity_map.positive.k_percent_per_rad_s` / `p0_percent` / `min_percent` / `percent_sign` | 12.75 / 13.9 / 20 / -1 |
-| `velocity_map.negative.k_percent_per_rad_s` / `p0_percent` / `min_percent` / `percent_sign` | 12.36 / 14.5 / 22 / +1 |
+| `max_speed_rad_per_sec` | 6.70 (the lower measured 100 % rate; the fit extrapolates 6.87) |
+| `velocity_map.positive.k_percent_per_rad_s` / `p0_percent` / `min_percent` / `percent_sign` | 12.90 / 11.38 / 20 / -1 |
+| `velocity_map.negative.k_percent_per_rad_s` / `p0_percent` / `min_percent` / `percent_sign` | 12.46 / 12.89 / 22 / +1 |
 | `velocity_map.below_minimum` | zero (default) |
 | `position_move_speed_percent` | 0 (not used; see the per-move speed finding) |
 
-With these the plugin sends `:DPR-33` for +1.5 rad/s, `:DPR33` for -1.5, `:DPR-52` for +3.0
-and `:DPR52` for -3.0. A single shared set would be k 12.6, p0 14.2, `min_percent` 22.
+With these the plugin sends `:DPR-31` for +1.5 rad/s, `:DPR32` for -1.5, `:DPR-50` for +3.0
+and `:DPR50` for -3.0. It sends 0 below about 0.63 rad/s (positive) and 0.69 rad/s (negative),
+which is above the personality's 0.6 rad/s minimum: see the report. These values have not yet
+had an acceptance run on the hardware.
 
 Sign convention: on the bench robot (firmware `Inverted` true) a **positive** percent moves
 the reported angle **down**, so a positive joint velocity needs a negative percent. Since
@@ -69,11 +74,17 @@ run reports the opposite, something in the wiring or `Inverted` changed.
   ([2026-10-17-realigned-dome.md](bench_results/2026-10-17-realigned-dome.md)): after the user's
   adjustment, no skips, same top speed and floor, less friction at the low end; MinSpeed lowered
   to 20.
+- **Sensor 1 skips, spacer, reprinted holder (2026-11-01)**
+  ([2026-11-01-holder-and-spacer.md](bench_results/2026-11-01-holder-and-spacer.md)): slow
+  travel showed sensor 1 misreading after the realignment (PR #25). A temporary spacer cured it
+  but cut the friction; the reprinted holder keeps the cure with friction back near the earlier
+  values, and the best position accuracy so far. `Inverted` was found false and set back to true.
 
 Superseded values, kept in their reports as history: old plate with dome
 (`max_speed_rad_per_sec` 6.56; k 11.76 / 11.72; p0 20.0 / 20.7; `min_percent` 32), new plate
 before the realignment at MinSpeed 32 (6.58; 11.94 / 11.75; 18.3 / 18.2; 32), realigned at
-MinSpeed 32 (6.55; 13.00 / 13.12; 13.0 / 12.8; 32). The no-dome reports are for comparison only.
+MinSpeed 32 (6.55; 13.00 / 13.12; 13.0 / 12.8; 32), realigned at MinSpeed 20 (6.62; 12.75 / 12.36;
+13.9 / 14.5; 20 / 22). The no-dome reports are for comparison only.
 
 ## Findings
 
@@ -182,6 +193,13 @@ at the arrival speed minus the fudge.
 - Getting below this needs a shorter stopping distance (active braking in the firmware, or a
   host-side final nudge), not more fudge tuning.
 
+- **`Inverted` must be true on this robot (2026-11-01).** With it false the position loop drives
+  away from the target and rocks near target + 180 for good: the firmware's timeout needs the
+  angle to stop changing, and `:DPR0` does not end the move. `:DPR` is unaffected, so velocity
+  driving hides the fault. `#DPSETUP` can rewrite the setting. Check `device.inverted` before any
+  `:DPA`. Commanding the dome's current position ends a stuck move, since it is reached at once.
+- Stop curve and rest error on the reprinted holder: `0.54 s x v - 23 deg`, mean 2.4, max 8.
+
 ### The sensor ring and the plausibility gate
 
 - **The 355 to 4 deg dead zone.** The controller never reports 359 to 2 deg, so every crossing
@@ -196,7 +214,13 @@ at the arrival speed minus the fudge.
   in (tens of thousands of reports at up to 6.9 rad/s). Insurance against a repeat of the
   old-plate misreads, which shifted the unwrapped angle by a full turn.
 - A benign one-sample edge race exists at dome angle 264 deg (sensors 1 and 3); the ring's
-  median filter removes it.
+  median filter removes it. A second one exists at 225 deg (sensors 0 and 2, intermediate code
+  114). Both show almost only with the angle falling.
+- **The sensor sweep cannot see slow-travel faults.** The sensor 1 fault passed a sweep while
+  skipping under teleop. Test with a slow pass and the raw ring recording as well; see the
+  [2026-11-01 report](bench_results/2026-11-01-holder-and-spacer.md).
+- The dome can park on an invalid code for 1 to 2 s, near ring angles 341 and 126; the filter
+  holds the angle. At 20 to 22 % it stalls at ring angles 92 to 124 and 231 to 233.
 
 ### Telemetry dropouts
 
@@ -208,6 +232,8 @@ at the arrival speed minus the fudge.
   sweep, with the dome at 70 % and no USB error in the kernel log; reports resumed and the stop
   went through. The velocity path has no watchdog, so a stalled process cannot stop the dome:
   keep a human at the robot.
+- One unexplained 17.9 s gap on 2026-11-01, right after a settings restore with the dome at rest.
+  It refused the next sweep's start.
 - A firmware position move cannot be cancelled from the host: `:DPR0` does not clear the
   firmware's target mode, a non-zero `:DPR` only overrides it while non-zero. The plugin tracks
   an outstanding move and refuses bench drives and settings writes until it ends.
